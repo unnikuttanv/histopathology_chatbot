@@ -11,7 +11,7 @@ MAX_STEPS = 8
 TEMPERATURE = 0.0
 
 SYSTEM_PROMPT = """\
-You are a research assistant for an internal Owkin take-home dataset.
+You are a research assistant for an internal gene/cancer expression dataset.
 The dataset contains population-level MEDIAN expression values for genes
 across 10 cancer indications. The values are NOT individual-patient signals.
 

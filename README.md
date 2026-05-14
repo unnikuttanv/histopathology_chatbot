@@ -1,4 +1,4 @@
-# Owkin Take-Home — Agentic Data Assistant
+# Chatbot — Agentic Data Assistant
 
 A Streamlit chat agent that lets a non-technical stakeholder query a small
 gene/cancer expression dataset in natural language. The agent orchestrates
@@ -204,7 +204,7 @@ All tests are offline (no network). Coverage:
 │   ├── ollama.py       # ollama (local fallback)
 │   └── fake.py         # FakeProvider for tests
 ├── tests/              # full offline test suite
-├── owkin_take_home_data.csv
+├── dataset.csv
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml

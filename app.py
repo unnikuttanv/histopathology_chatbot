@@ -1,4 +1,4 @@
-"""Streamlit chat UI for the Owkin take-home agent."""
+"""Streamlit chat UI for the data chatbot."""
 from __future__ import annotations
 
 import streamlit as st
@@ -13,8 +13,8 @@ BANNER = (
 )
 
 INTENDED_USE = (
-    "**Intended use.** Research and exploration tool for an internal Owkin "
-    "take-home dataset of population-level gene expression medians. "
+    "**Intended use.** Research and exploration tool for an internal "
+    "dataset of population-level gene expression medians. "
     "**Not a medical device.** Not for diagnosis, prognosis, risk "
     "stratification, treatment selection, drug recommendation, clinical "
     "decision support, individual-patient interpretation, triage, or "
@@ -105,11 +105,11 @@ def _render_history():
 
 
 def main():
-    st.set_page_config(page_title="Owkin Data Agent", page_icon=":dna:")
+    st.set_page_config(page_title="Chatbot", page_icon=":dna:")
     _init_session()
 
     st.markdown(f":red-background[{BANNER}]")
-    st.title("Owkin Data Agent")
+    st.title("Chatbot")
 
     _render_sidebar()
 

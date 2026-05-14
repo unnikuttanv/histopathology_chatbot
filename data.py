@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-CSV_PATH = Path(__file__).parent / "owkin_take_home_data.csv"
+CSV_PATH = Path(__file__).parent / "dataset.csv"
 
 df = pd.read_csv(CSV_PATH)
 

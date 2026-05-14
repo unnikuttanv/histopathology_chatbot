@@ -1,4 +1,4 @@
-# Owkin Take-Home — Agentic Data Assistant Design
+# Chatbot — Agentic Data Assistant Design
 
 **Date:** 2026-05-14
 **Status:** Revised — providers reordered (Gemini default / Ollama fallback / OpenAI opt-in)
@@ -10,7 +10,7 @@
 
 **Goals**
 - Natural-language chat interface usable by a non-technical stakeholder.
-- Orchestrate the two provided functions over `owkin_take_home_data.csv`.
+- Orchestrate the two provided functions over `dataset.csv`.
 - Add a small set of helper tools (comparison, top-N, chart) that demonstrate multi-tool reasoning.
 - Strong grounding — answers come from the dataset, not the model's prior knowledge.
 - Runnable locally on Mac/Windows, no GPU, Docker-first.
@@ -27,7 +27,7 @@
 
 ## 2. Dataset
 
-`owkin_take_home_data.csv` — 81 rows, 3 columns: `cancer_indication`, `gene`, `median_value`.
+`dataset.csv` — 81 rows, 3 columns: `cancer_indication`, `gene`, `median_value`.
 
 Ten cancer indications present:
 `breast, colorectal, gastric, glioblastoma, lung, melanoma, ovarian, pancreatic, prostate, renal`.
@@ -84,7 +84,7 @@ Ten cancer indications present:
 │   • plot_expressions(mapping)   ← chart                 │
 └─────────────────────────────────────────────────────────┘
 
-data.py    — loads owkin_take_home_data.csv once into a module-level df
+data.py    — loads dataset.csv once into a module-level df
 config.py  — loads env (LLM_PROVIDER, GEMINI_API_KEY, OLLAMA_MODEL, OLLAMA_HOST),
              system prompt, MAX_STEPS
 audit.py   — append-only JSONL per session (logs/YYYY-MM-DD-HHMMSS.jsonl)
@@ -123,7 +123,7 @@ Four small modules + a `providers/` package. `agent.py` has no Streamlit imports
 │   ├── test_safety.py                # PII patterns + clinical refusal taxonomy
 │   ├── test_audit.py                 # JSONL log shape and redaction
 │   └── test_config.py                # env loading + fallback logic
-├── owkin_take_home_data.csv
+├── dataset.csv
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
@@ -232,7 +232,7 @@ This system handles oncology-adjacent data. Even as a POC, it must be unambiguou
 
 ### Intended use
 
-> *Research and exploration tool for an internal Owkin take-home dataset of population-level gene expression medians. **Not a medical device.** Not for diagnosis, prognosis, risk stratification, treatment selection, drug recommendation, clinical decision support, individual-patient interpretation, triage, or biomarker validation.*
+> *Research and exploration tool for an internal gene/cancer expression dataset of population-level gene expression medians. **Not a medical device.** Not for diagnosis, prognosis, risk stratification, treatment selection, drug recommendation, clinical decision support, individual-patient interpretation, triage, or biomarker validation.*
 
 This statement appears in the README, the UI sidebar "About" panel, and is summarised in the persistent banner.
 

@@ -5,7 +5,12 @@
       "Skill(superpowers:brainstorming:*)",
       "Bash(python -m pytest tests/test_safety.py -q)",
       "Read(//tmp/**)",
-      "Bash(python -m pytest tests/test_providers_gemini.py)"
+      "Bash(python -m pytest tests/test_providers_gemini.py)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest -q --tb=short)",
+      "Bash(python -c \"import pandas; df = pandas.read_csv\\('dataset.csv'\\); print\\('rows:', len\\(df\\)\\)\")",
+      "Bash(python -u -m pytest tests/test_safety.py -v --no-header)",
+      "Bash(echo \"PID=$!\")"
     ]
   }
 }
