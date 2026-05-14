@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(superpowers:brainstorming)",
+      "Skill(superpowers:brainstorming:*)",
+      "Bash(python -m pytest tests/test_safety.py -q)",
+      "Read(//tmp/**)",
+      "Bash(python -m pytest tests/test_providers_gemini.py)"
+    ]
+  }
+}

@@ -1,0 +1,3403 @@
+# Owkin Agentic Data Assistant — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a Streamlit-based agentic chat that lets a non-technical stakeholder query the take-home gene/cancer dataset in natural language. The agent orchestrates six tools over the CSV via an LLM provider (**Gemini cloud by default, Ollama local as fallback, OpenAI as opt-in**), with pre-LLM safety filters, an audit log, and a strict refusal taxonomy.
+
+**Architecture:** Streamlit UI → safety pre-filters (PII + clinical refusal taxonomy) → provider-agnostic agent loop → LLM provider (Gemini / OpenAI / Ollama) → tools layer over a pandas DataFrame. `config.build_provider()` implements resolution order: default Gemini → fall back to Ollama if no key → explicit OpenAI requires its key. All tools are pure functions returning either data or structured errors. Audit log written as JSONL per session.
+
+**Tech Stack:** Python 3.11, Streamlit, pandas, matplotlib, google-generativeai, openai, ollama (Python client), python-dotenv, pytest. Docker for portability.
+
+**Spec:** [docs/superpowers/specs/2026-05-14-owkin-agent-design.md](../specs/2026-05-14-owkin-agent-design.md)
+
+---
+
+## Conventions used throughout this plan
+
+- **Canonical history format** is OpenAI-style messages. Providers translate to their native format.
+  - `{"role": "user", "content": str}`
+  - `{"role": "assistant", "content": str | None, "tool_calls": list | None}`
+  - `{"role": "tool", "tool_call_id": str, "name": str, "content": str}`
+  - tool_call: `{"id": str, "type": "function", "function": {"name": str, "arguments": str}}` (arguments is a JSON string)
+- **Tool spec format** is OpenAI-style function declarations (works directly with Ollama; Gemini provider converts).
+- **All paths in this plan are relative to the project root** (`c:\Users\unnik\OneDrive\Desktop\assignment\newowkin`).
+- **Tests** use `pytest`. Run with `python -m pytest -q`.
+- **No network in any test.** Provider tests use mocked HTTP; agent tests use a `FakeProvider`.
+
+---
+
+## Task 1: Project scaffolding
+
+**Files:**
+- Create: `requirements.txt`
+- Create: `.env.example`
+- Create: `.gitignore`
+- Create: `pyproject.toml`
+- Create: `tests/__init__.py`
+- Create: `tests/conftest.py`
+- Create: `providers/__init__.py`
+
+- [ ] **Step 1: Create `requirements.txt`**
+
+```text
+streamlit==1.37.0
+pandas==2.2.2
+matplotlib==3.9.0
+google-generativeai==0.7.2
+openai==1.40.0
+ollama==0.3.0
+python-dotenv==1.0.1
+pytest==8.3.2
+```
+
+- [ ] **Step 2: Create `.env.example`**
+
+```text
+# LLM provider: "gemini" (default), "openai" (opt-in), or "ollama" (local fallback)
+LLM_PROVIDER=gemini
+
+# Gemini (default) — leave key blank to auto-fall-back to Ollama
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-1.5-flash
+
+# OpenAI (opt-in) — required when LLM_PROVIDER=openai
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+
+# Ollama (local fallback, or LLM_PROVIDER=ollama for explicit privacy mode)
+OLLAMA_MODEL=llama3.1:8b
+OLLAMA_HOST=http://localhost:11434
+```
+
+- [ ] **Step 3: Create `.gitignore`**
+
+```text
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+logs/
+.venv/
+venv/
+.DS_Store
+*.egg-info/
+```
+
+- [ ] **Step 4: Create `pyproject.toml`** (minimal — just pytest config)
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+```
+
+- [ ] **Step 5: Create `tests/__init__.py`** (empty file)
+
+```python
+```
+
+- [ ] **Step 6: Create `providers/__init__.py`** (empty file)
+
+```python
+```
+
+- [ ] **Step 7: Create `tests/conftest.py`**
+
+```python
+import matplotlib
+matplotlib.use("Agg")  # headless backend for tests
+```
+
+- [ ] **Step 8: Install dependencies and verify pytest works**
+
+Run: `python -m pip install -r requirements.txt`
+Then: `python -m pytest -q`
+Expected: `no tests ran in ...s` (or similar) — pytest discovers nothing yet, that's fine.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git init
+git add requirements.txt .env.example .gitignore pyproject.toml tests/__init__.py tests/conftest.py providers/__init__.py
+git commit -m "chore: project scaffolding"
+```
+
+---
+
+## Task 2: Dataset loader (`data.py`)
+
+**Files:**
+- Create: `data.py`
+- Test: `tests/test_data.py`
+
+- [ ] **Step 1: Write failing test**
+
+Create `tests/test_data.py`:
+
+```python
+import data
+
+
+def test_dataframe_has_expected_columns():
+    assert list(data.df.columns) == ["cancer_indication", "gene", "median_value"]
+
+
+def test_dataframe_has_81_rows():
+    assert len(data.df) == 81
+
+
+def test_cancers_list_returns_10_unique_sorted():
+    cancers = data.cancers()
+    assert len(cancers) == 10
+    assert cancers == sorted(cancers)
+    assert "lung" in cancers
+    assert "breast" in cancers
+    assert "esophageal" not in cancers
+```
+
+- [ ] **Step 2: Run test to verify failure**
+
+Run: `python -m pytest tests/test_data.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'data'`
+
+- [ ] **Step 3: Implement `data.py`**
+
+```python
+"""Loads the take-home dataset once at import time."""
+from pathlib import Path
+
+import pandas as pd
+
+CSV_PATH = Path(__file__).parent / "owkin_take_home_data.csv"
+
+df = pd.read_csv(CSV_PATH)
+
+
+def cancers() -> list[str]:
+    return sorted(df["cancer_indication"].unique().tolist())
+```
+
+- [ ] **Step 4: Run test to verify pass**
+
+Run: `python -m pytest tests/test_data.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add data.py tests/test_data.py
+git commit -m "feat(data): load CSV into module-level DataFrame"
+```
+
+---
+
+## Task 3: Tool — `list_cancers`
+
+**Files:**
+- Create: `tools.py`
+- Test: `tests/test_tools.py`
+
+- [ ] **Step 1: Write failing test**
+
+Create `tests/test_tools.py`:
+
+```python
+import tools
+
+
+def test_list_cancers_returns_sorted_list():
+    result = tools.list_cancers()
+    assert isinstance(result, list)
+    assert result == sorted(result)
+    assert len(result) == 10
+    assert "lung" in result
+```
+
+- [ ] **Step 2: Run test to verify failure**
+
+Run: `python -m pytest tests/test_tools.py::test_list_cancers_returns_sorted_list -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'tools'`
+
+- [ ] **Step 3: Implement `tools.py`**
+
+```python
+"""Agent tools over the take-home dataset.
+
+Every tool is a pure function. Tools never raise to the agent —
+they return either the requested data or a structured {"error": ...}
+result. The agent treats both as normal tool output.
+"""
+from __future__ import annotations
+
+import data
+
+
+def list_cancers() -> list[str]:
+    """Return the cancer indications present in the dataset."""
+    return data.cancers()
+```
+
+- [ ] **Step 4: Run test to verify pass**
+
+Run: `python -m pytest tests/test_tools.py::test_list_cancers_returns_sorted_list -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): list_cancers"
+```
+
+---
+
+## Task 4: Tool — `get_targets` (with did-you-mean)
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests to `tests/test_tools.py`**
+
+```python
+def test_get_targets_known_cancer_returns_gene_list():
+    result = tools.get_targets("lung")
+    assert isinstance(result, list)
+    assert "ALK" in result
+    assert "KRAS" in result
+
+
+def test_get_targets_known_cancer_is_case_insensitive():
+    assert tools.get_targets("LUNG") == tools.get_targets("lung")
+
+
+def test_get_targets_unknown_cancer_returns_error_with_suggestions():
+    result = tools.get_targets("breastt")
+    assert isinstance(result, dict)
+    assert "error" in result
+    assert "unknown cancer" in result["error"].lower()
+    assert "breast" in result["did_you_mean"]
+
+
+def test_get_targets_unknown_cancer_includes_available_list():
+    result = tools.get_targets("totally-made-up-cancer")
+    assert isinstance(result, dict)
+    assert result["did_you_mean"] == []
+    assert sorted(result["available"]) == sorted(tools.list_cancers())
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k get_targets`
+Expected: 4 failures (`AttributeError: module 'tools' has no attribute 'get_targets'`).
+
+- [ ] **Step 3: Add `get_targets` to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+import difflib
+
+
+def get_targets(cancer_name: str) -> list[str] | dict:
+    """Return the list of genes associated with a cancer indication.
+
+    Returns either a list[str] of gene names, or a structured error dict
+    when the cancer name is not present in the dataset.
+    """
+    if not isinstance(cancer_name, str) or not cancer_name.strip():
+        return {
+            "error": "cancer_name must be a non-empty string",
+            "did_you_mean": [],
+            "available": list_cancers(),
+        }
+    name = cancer_name.strip().lower()
+    available = list_cancers()
+    if name not in available:
+        suggestions = difflib.get_close_matches(name, available, n=3, cutoff=0.6)
+        return {
+            "error": f"unknown cancer {cancer_name!r}",
+            "did_you_mean": suggestions,
+            "available": available,
+        }
+    return data.df.loc[data.df["cancer_indication"] == name, "gene"].tolist()
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v -k get_targets`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): get_targets with did-you-mean fallback"
+```
+
+---
+
+## Task 5: Tool — `get_expressions`
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/test_tools.py`:
+
+```python
+def test_get_expressions_returns_dict_of_floats():
+    genes = tools.get_targets("lung")
+    result = tools.get_expressions(genes)
+    assert isinstance(result, dict)
+    assert all(isinstance(k, str) for k in result)
+    assert all(isinstance(v, float) for v in result.values())
+    assert set(result.keys()) == set(genes)
+
+
+def test_get_expressions_empty_list_returns_empty_dict():
+    assert tools.get_expressions([]) == {}
+
+
+def test_get_expressions_unknown_gene_is_omitted():
+    result = tools.get_expressions(["NOT_A_REAL_GENE", "KRAS"])
+    assert "NOT_A_REAL_GENE" not in result
+    assert "KRAS" in result
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k get_expressions`
+Expected: 3 failures (`AttributeError: module 'tools' has no attribute 'get_expressions'`).
+
+- [ ] **Step 3: Add `get_expressions` to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+def get_expressions(genes: list[str]) -> dict[str, float]:
+    """Return median expression values for the given genes.
+
+    Unknown genes are silently omitted (consistent with the take-home spec).
+    """
+    if not genes:
+        return {}
+    subset = data.df[data.df["gene"].isin(genes)]
+    return dict(zip(subset["gene"], subset["median_value"].astype(float)))
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v -k get_expressions`
+Expected: 3 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): get_expressions"
+```
+
+---
+
+## Task 6: Tool — `top_genes`
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/test_tools.py`:
+
+```python
+def test_top_genes_returns_sorted_descending():
+    result = tools.top_genes("lung", 3)
+    assert isinstance(result, list)
+    assert len(result) == 3
+    values = [row["median_value"] for row in result]
+    assert values == sorted(values, reverse=True)
+
+
+def test_top_genes_default_n_is_5():
+    result = tools.top_genes("breast")
+    assert len(result) == 5
+
+
+def test_top_genes_caps_at_available_count():
+    # lung has 5 rows; asking for 100 returns 5
+    result = tools.top_genes("lung", 100)
+    assert len(result) == 5
+
+
+def test_top_genes_unknown_cancer_returns_error():
+    result = tools.top_genes("nonexistent", 3)
+    assert isinstance(result, dict)
+    assert "error" in result
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k top_genes`
+Expected: 4 failures (`AttributeError`).
+
+- [ ] **Step 3: Add `top_genes` to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+def top_genes(cancer_name: str, n: int = 5) -> list[dict] | dict:
+    """Return the top-N genes by median expression for a cancer."""
+    targets = get_targets(cancer_name)
+    if isinstance(targets, dict):
+        return targets  # error dict
+    name = cancer_name.strip().lower()
+    subset = (
+        data.df[data.df["cancer_indication"] == name]
+        .sort_values("median_value", ascending=False)
+        .head(n)
+    )
+    return [
+        {"gene": row.gene, "median_value": float(row.median_value)}
+        for row in subset.itertuples(index=False)
+    ]
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v -k top_genes`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): top_genes"
+```
+
+---
+
+## Task 7: Tool — `compare_cancers`
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/test_tools.py`:
+
+```python
+def test_compare_cancers_returns_three_buckets():
+    result = tools.compare_cancers("breast", "gastric")
+    assert set(result.keys()) == {"shared", "only_a", "only_b"}
+    # breast and gastric both have PIK3CA and CDH1
+    assert "PIK3CA" in result["shared"]
+    assert "CDH1" in result["shared"]
+
+
+def test_compare_cancers_disjoint_sets():
+    result = tools.compare_cancers("lung", "prostate")
+    breast_genes = set(tools.get_targets("lung"))
+    prostate_genes = set(tools.get_targets("prostate"))
+    assert set(result["shared"]) == breast_genes & prostate_genes
+    assert set(result["only_a"]) == breast_genes - prostate_genes
+    assert set(result["only_b"]) == prostate_genes - breast_genes
+
+
+def test_compare_cancers_unknown_first_returns_error():
+    result = tools.compare_cancers("nope", "lung")
+    assert "error" in result
+
+
+def test_compare_cancers_unknown_second_returns_error():
+    result = tools.compare_cancers("lung", "nope")
+    assert "error" in result
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k compare_cancers`
+Expected: 4 failures (`AttributeError`).
+
+- [ ] **Step 3: Add `compare_cancers` to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+def compare_cancers(cancer_a: str, cancer_b: str) -> dict:
+    """Compare two cancers by gene set."""
+    a_genes = get_targets(cancer_a)
+    if isinstance(a_genes, dict):
+        return a_genes
+    b_genes = get_targets(cancer_b)
+    if isinstance(b_genes, dict):
+        return b_genes
+    a_set, b_set = set(a_genes), set(b_genes)
+    return {
+        "shared": sorted(a_set & b_set),
+        "only_a": sorted(a_set - b_set),
+        "only_b": sorted(b_set - a_set),
+    }
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v -k compare_cancers`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): compare_cancers"
+```
+
+---
+
+## Task 8: Tool — `plot_expressions` (with side-channel)
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/test_tools.py`:
+
+```python
+import matplotlib.figure
+
+
+def test_plot_expressions_returns_chart_id_and_figure():
+    tools.reset_figures()
+    result = tools.plot_expressions({"KRAS": 0.359, "ALK": 0.215}, "Lung sample")
+    assert "chart_id" in result
+    fig = tools.pop_last_figure()
+    assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_plot_expressions_empty_returns_error():
+    result = tools.plot_expressions({}, "empty")
+    assert isinstance(result, dict)
+    assert "error" in result
+
+
+def test_plot_expressions_bars_match_input_order():
+    tools.reset_figures()
+    tools.plot_expressions({"A": 0.1, "B": 0.5, "C": 0.3}, "test")
+    fig = tools.pop_last_figure()
+    ax = fig.axes[0]
+    bar_heights = [p.get_height() for p in ax.patches]
+    assert bar_heights == [0.1, 0.5, 0.3]
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k plot_expressions`
+Expected: 3 failures (`AttributeError`).
+
+- [ ] **Step 3: Add `plot_expressions` and the figure side-channel to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+import uuid
+
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+
+# Side-channel: tools that produce a figure append it here. The agent
+# pops figures off this queue after dispatching a tool call so the UI
+# can render them. Keeps figure objects out of the LLM's context.
+_figure_queue: list[Figure] = []
+
+
+def reset_figures() -> None:
+    _figure_queue.clear()
+
+
+def pop_last_figure() -> Figure | None:
+    return _figure_queue.pop() if _figure_queue else None
+
+
+def plot_expressions(expressions: dict[str, float], title: str = "") -> dict:
+    """Render a bar chart of expression values. Returns a chart_id;
+    the figure is queued on the side-channel for the UI."""
+    if not expressions:
+        return {"error": "no expressions provided"}
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    genes = list(expressions.keys())
+    values = list(expressions.values())
+    ax.bar(genes, values)
+    ax.set_xlabel("Gene")
+    ax.set_ylabel("Median expression")
+    if title:
+        ax.set_title(title)
+    fig.tight_layout()
+    _figure_queue.append(fig)
+    return {"chart_id": str(uuid.uuid4()), "n_bars": len(genes), "title": title}
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v -k plot_expressions`
+Expected: 3 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): plot_expressions with figure side-channel"
+```
+
+---
+
+## Task 9: `TOOL_SPEC` and `DISPATCH`
+
+**Files:**
+- Modify: `tools.py`
+- Modify: `tests/test_tools.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/test_tools.py`:
+
+```python
+def test_dispatch_routes_known_tool():
+    result, fig = tools.dispatch("list_cancers", {})
+    assert isinstance(result, list)
+    assert fig is None
+
+
+def test_dispatch_routes_unknown_tool():
+    result, fig = tools.dispatch("not_a_tool", {})
+    assert "error" in result
+    assert "available" in result
+    assert fig is None
+
+
+def test_dispatch_returns_figure_when_tool_emits_one():
+    result, fig = tools.dispatch(
+        "plot_expressions", {"expressions": {"X": 0.5}, "title": "t"}
+    )
+    assert "chart_id" in result
+    import matplotlib.figure
+    assert isinstance(fig, matplotlib.figure.Figure)
+
+
+def test_dispatch_handles_bad_arguments_gracefully():
+    # Missing required arg should be caught and returned as an error
+    result, fig = tools.dispatch("get_targets", {})
+    assert "error" in result
+
+
+def test_tool_spec_has_all_six_tools():
+    names = [t["function"]["name"] for t in tools.TOOL_SPEC]
+    assert set(names) == {
+        "list_cancers",
+        "get_targets",
+        "get_expressions",
+        "top_genes",
+        "compare_cancers",
+        "plot_expressions",
+    }
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_tools.py -v -k "dispatch or tool_spec"`
+Expected: failures (`AttributeError`).
+
+- [ ] **Step 3: Add `TOOL_SPEC` and `dispatch` to `tools.py`**
+
+Append to `tools.py`:
+
+```python
+TOOL_SPEC: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_cancers",
+            "description": "List the cancer indications present in the dataset.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_targets",
+            "description": (
+                "Return the list of genes associated with a cancer indication. "
+                "Returns a structured error with did_you_mean if the cancer is unknown."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cancer_name": {
+                        "type": "string",
+                        "description": "Cancer indication, e.g. 'lung'. Case-insensitive.",
+                    }
+                },
+                "required": ["cancer_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_expressions",
+            "description": "Return median expression values for the given genes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "genes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of gene symbols.",
+                    }
+                },
+                "required": ["genes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "top_genes",
+            "description": "Return the top-N genes by median expression for a cancer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cancer_name": {"type": "string"},
+                    "n": {"type": "integer", "default": 5},
+                },
+                "required": ["cancer_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_cancers",
+            "description": (
+                "Compare two cancers by gene set. Returns shared, only_a, only_b."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cancer_a": {"type": "string"},
+                    "cancer_b": {"type": "string"},
+                },
+                "required": ["cancer_a", "cancer_b"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_expressions",
+            "description": (
+                "Render a bar chart of expression values. Call get_expressions first; "
+                "pass its dict as the 'expressions' argument."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expressions": {
+                        "type": "object",
+                        "description": "Mapping from gene symbol to median expression value.",
+                    },
+                    "title": {"type": "string", "default": ""},
+                },
+                "required": ["expressions"],
+            },
+        },
+    },
+]
+
+
+_DISPATCH = {
+    "list_cancers": list_cancers,
+    "get_targets": get_targets,
+    "get_expressions": get_expressions,
+    "top_genes": top_genes,
+    "compare_cancers": compare_cancers,
+    "plot_expressions": plot_expressions,
+}
+
+
+def dispatch(name: str, args: dict) -> tuple[dict | list, Figure | None]:
+    """Execute a tool by name. Returns (result, optional_figure).
+
+    Unknown tools and bad arguments are returned as structured errors,
+    never raised to the agent.
+    """
+    fn = _DISPATCH.get(name)
+    if fn is None:
+        return (
+            {"error": f"unknown tool {name!r}", "available": list(_DISPATCH)},
+            None,
+        )
+    try:
+        result = fn(**(args or {}))
+    except TypeError as e:
+        return ({"error": f"bad arguments for {name}: {e}", "received": args}, None)
+    except Exception as e:
+        return ({"error": f"{type(e).__name__}: {e}"}, None)
+    fig = pop_last_figure() if name == "plot_expressions" else None
+    return result, fig
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_tools.py -v`
+Expected: all `tools` tests passing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools.py tests/test_tools.py
+git commit -m "feat(tools): TOOL_SPEC and dispatch with structured error handling"
+```
+
+---
+
+## Task 10: Safety — PII pre-filter
+
+**Files:**
+- Create: `safety.py`
+- Create: `tests/test_safety.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_safety.py`:
+
+```python
+import safety
+
+
+def test_pii_detects_email():
+    m = safety.detect_pii("contact jane@example.com about this")
+    assert m.matched
+    assert "email" in m.patterns
+
+
+def test_pii_detects_phone():
+    m = safety.detect_pii("call (415) 555-0123 if urgent")
+    assert m.matched
+    assert "phone" in m.patterns
+
+
+def test_pii_detects_dob_us_format():
+    m = safety.detect_pii("DOB 03/15/1972")
+    assert m.matched
+    assert "dob" in m.patterns
+
+
+def test_pii_detects_dob_iso_format():
+    m = safety.detect_pii("born on 1972-03-15")
+    assert m.matched
+    assert "dob" in m.patterns
+
+
+def test_pii_detects_mrn():
+    m = safety.detect_pii("MRN: 1234567 needs review")
+    assert m.matched
+    assert "mrn" in m.patterns
+
+
+def test_pii_detects_name_adjacent():
+    m = safety.detect_pii("patient Smith was seen today")
+    assert m.matched
+    assert "name_adjacent" in m.patterns
+
+
+def test_pii_no_match_on_dataset_question():
+    assert not safety.detect_pii("what are the top 5 genes in lung cancer").matched
+
+
+def test_pii_no_match_on_capability_question():
+    assert not safety.detect_pii("how can you help me").matched
+
+
+def test_pii_refusal_message_is_a_string():
+    assert isinstance(safety.PII_REFUSAL, str)
+    assert "patient" in safety.PII_REFUSAL.lower()
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_safety.py -v -k pii`
+Expected: 9 failures (`ModuleNotFoundError: No module named 'safety'`).
+
+- [ ] **Step 3: Create `safety.py` with the PII filter**
+
+Create `safety.py`:
+
+```python
+"""Pre-LLM safety filters and refusal taxonomy.
+
+Two filters run BEFORE any LLM call:
+
+1. detect_pii(text)              — patient-identifiable input
+2. detect_clinical_question(text)— clinical-question shapes refused
+                                    by the §7.5 taxonomy
+
+Both are best-effort regex/keyword matchers. They are the first
+line of defense — the system prompt embeds the same taxonomy as
+the second line, and tests pin both.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+
+PII_PATTERNS: dict[str, re.Pattern] = {
+    "email": re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    "phone": re.compile(
+        r"\b(?:\+?\d{1,3}[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b"
+    ),
+    "dob": re.compile(
+        r"\b(?:0?[1-9]|1[0-2])[/\-](?:0?[1-9]|[12]\d|3[01])[/\-](?:19|20)\d{2}\b"
+        r"|\b(?:19|20)\d{2}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])\b"
+    ),
+    "mrn": re.compile(
+        r"\b(?:MRN|Patient\s*ID|Medical\s*Record)\b[:#\s]+\S+", re.IGNORECASE
+    ),
+    "name_adjacent": re.compile(
+        r"(?i)\b(?:mr|mrs|ms|dr)\.?\s+[A-Z]\w+"
+        r"|(?i)\bpatient\s+[A-Z]\w+"
+    ),
+}
+
+
+@dataclass
+class PIIMatch:
+    matched: bool
+    patterns: list[str] = field(default_factory=list)
+
+
+def detect_pii(text: str) -> PIIMatch:
+    if not isinstance(text, str) or not text:
+        return PIIMatch(matched=False)
+    hits = [name for name, pat in PII_PATTERNS.items() if pat.search(text)]
+    return PIIMatch(matched=bool(hits), patterns=hits)
+
+
+PII_REFUSAL = (
+    "I can't accept patient-identifiable information. This system only "
+    "operates on a small de-identified dataset of population-level expression "
+    "medians. Please rephrase without any patient data, names, dates, or IDs."
+)
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_safety.py -v -k pii`
+Expected: 9 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add safety.py tests/test_safety.py
+git commit -m "feat(safety): PII pre-filter with regex patterns"
+```
+
+---
+
+## Task 11: Safety — clinical refusal taxonomy
+
+**Files:**
+- Modify: `safety.py`
+- Modify: `tests/test_safety.py`
+
+- [ ] **Step 1: Append failing tests to `tests/test_safety.py`**
+
+```python
+# Gold-standard refusal cases from §7.5
+
+CLINICAL_GOLD_CASES = [
+    ("Does this patient have lung cancer?", "diagnosis"),
+    ("Which patients are high risk?", "risk_stratification"),
+    ("Predict mortality for this cohort.", "prognosis"),
+    ("Who needs treatment?", "therapeutic_decision_support"),
+    ("Which drug should we use for breast cancer?", "treatment_selection"),
+    ("Recommend the next clinical action.", "clinical_decision_support"),
+    ("Interpret this lab result.", "patient_interpretation"),
+    ("Prioritise these patients.", "triage"),
+    ("Is BRCA1 a validated target for breast?", "biomarker_validation"),
+    ("Does this expression value mean the drug works?", "off_label_inference"),
+]
+
+
+def test_clinical_filter_triggers_on_each_gold_case():
+    for text, expected_category in CLINICAL_GOLD_CASES:
+        m = safety.detect_clinical_question(text)
+        assert m.matched, f"should match {text!r}"
+        assert m.category == expected_category, (
+            f"{text!r}: expected {expected_category}, got {m.category}"
+        )
+
+
+def test_clinical_filter_does_not_match_dataset_questions():
+    benign = [
+        "what cancers do you cover",
+        "list the genes in lung",
+        "top 5 in pancreatic",
+        "compare breast and prostate",
+        "how can you help me",
+        "show me a chart of expressions in lung",
+    ]
+    for text in benign:
+        assert not safety.detect_clinical_question(text).matched, text
+
+
+def test_refusal_for_returns_text_with_category_and_redirect():
+    msg = safety.refusal_for("diagnosis")
+    assert "diagnosis" in msg.lower()
+    # Must offer a redirect example
+    assert "you can ask" in msg.lower() or "for example" in msg.lower()
+
+
+def test_refusal_for_each_category_returns_unique_text():
+    seen = set()
+    for _, cat in CLINICAL_GOLD_CASES:
+        seen.add(safety.refusal_for(cat))
+    assert len(seen) == len(CLINICAL_GOLD_CASES)
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_safety.py -v -k clinical`
+Expected: 4 failures (`AttributeError: module 'safety' has no attribute 'detect_clinical_question'`).
+
+- [ ] **Step 3: Add the clinical filter and refusal templates to `safety.py`**
+
+Append to `safety.py`:
+
+```python
+# Order matters: more specific categories first so they take precedence.
+CLINICAL_PATTERNS: list[tuple[str, re.Pattern]] = [
+    (
+        "diagnosis",
+        re.compile(
+            r"\bdoes\b.*\bpatient\b.*\bhave\b"
+            r"|\bdiagnos(?:e|is)\b.*\bpatient\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "risk_stratification",
+        re.compile(
+            r"\b(?:which|what|who)\b[^?\.]*\bpatient(?:s)?\b[^?\.]*\b(?:high|low|moderate)?\s*risk\b"
+            r"|\bstratif(?:y|ication)\b[^?\.]*\b(?:risk|patient)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "prognosis",
+        re.compile(
+            r"\b(?:predict|forecast|estimat\w*)\b[^?\.]*\b(?:mortality|readmission|survival|outcome|progression|recurrence)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "therapeutic_decision_support",
+        re.compile(
+            r"\bwho\b[^?\.]*\b(?:needs?|requires?)\b[^?\.]*\btreatment\b"
+            r"|\bwhich\s+patient(?:s)?\b[^?\.]*\btreatment\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "treatment_selection",
+        re.compile(
+            r"\b(?:which|what)\s+(?:drug|treatment|therapy|medication)\b[^?\.]*\b(?:for|to|should|use)\b"
+            r"|\brank\b[^?\.]*\b(?:drugs?|treatments?|therapies?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "clinical_decision_support",
+        re.compile(
+            r"\b(?:recommend|suggest)\b[^?\.]*\b(?:next\s+(?:action|step)|clinical\s+action)\b"
+            r"|\bwhat\s+should\s+(?:we|i|the\s+doctor|the\s+clinician)\s+do\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "patient_interpretation",
+        re.compile(
+            r"\binterpret\b[^?\.]*\b(?:this|these|the)\s+(?:lab|result|record|chart|scan|test|biopsy)\b"
+            r"|\bwhat\s+does\s+(?:this|these)\s+(?:lab|result|record|chart|scan)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "triage",
+        re.compile(
+            r"\b(?:prioriti[sz]e|triage)\b[^?\.]*\bpatient(?:s)?\b"
+            r"|\brank\b[^?\.]*\bpatient(?:s)?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "biomarker_validation",
+        re.compile(
+            r"\bis\s+\w+\s+a\s+validated\b"
+            r"|\bvalidated\s+(?:biomarker|target|marker)\s+for\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "off_label_inference",
+        re.compile(
+            r"\b(?:does|do|will|would)\b[^?\.]*\bexpression\b[^?\.]*\b(?:mean|means|indicate|indicates|suggest|suggests|imply|implies|predict|predicts|work|works|effective)\b"
+            r"|\b(?:does|do)\b[^?\.]*\b(?:this|the)\s+(?:value|median)\b[^?\.]*\b(?:mean|indicate|suggest|imply)\b",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
+@dataclass
+class ClinicalMatch:
+    matched: bool
+    category: str | None = None
+
+
+def detect_clinical_question(text: str) -> ClinicalMatch:
+    if not isinstance(text, str) or not text:
+        return ClinicalMatch(matched=False)
+    for category, pat in CLINICAL_PATTERNS:
+        if pat.search(text):
+            return ClinicalMatch(matched=True, category=category)
+    return ClinicalMatch(matched=False)
+
+
+_REFUSAL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
+    # category -> (description, redirect example)
+    "diagnosis": (
+        "diagnosis or interpretation of whether a patient has a condition",
+        "What genes are associated with breast cancer in this dataset?",
+    ),
+    "risk_stratification": (
+        "patient risk stratification",
+        "What are the top 5 genes by expression in pancreatic cancer?",
+    ),
+    "prognosis": (
+        "prognosis or prediction of patient outcomes",
+        "Compare the gene sets for lung and prostate.",
+    ),
+    "therapeutic_decision_support": (
+        "therapeutic decision support",
+        "List the cancer indications covered in the dataset.",
+    ),
+    "treatment_selection": (
+        "treatment selection or drug ranking",
+        "Show median expression values for the genes in breast cancer.",
+    ),
+    "clinical_decision_support": (
+        "clinical decision support or next-action recommendations",
+        "What are the top genes by expression in glioblastoma?",
+    ),
+    "patient_interpretation": (
+        "patient-specific interpretation of clinical results",
+        "Plot the expression values for genes in lung.",
+    ),
+    "triage": (
+        "patient triage or prioritisation",
+        "Compare breast and gastric cancer gene sets.",
+    ),
+    "biomarker_validation": (
+        "biomarker validation claims",
+        "Show the median expression for BRCA1 and BRCA2 in breast cancer.",
+    ),
+    "off_label_inference": (
+        "inferences about drug response beyond the dataset",
+        "What is the median expression of KRAS in lung cancer?",
+    ),
+}
+
+
+def refusal_for(category: str) -> str:
+    desc, redirect = _REFUSAL_DESCRIPTIONS.get(
+        category,
+        ("clinical or patient-specific reasoning", "List the cancer indications in the dataset."),
+    )
+    return (
+        f"This system doesn't provide {desc}. It only summarises "
+        f"population-level expression medians from a small research dataset. "
+        f"For example, you can ask: '{redirect}'"
+    )
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_safety.py -v`
+Expected: all safety tests passing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add safety.py tests/test_safety.py
+git commit -m "feat(safety): clinical refusal taxonomy with 10 categories"
+```
+
+---
+
+## Task 12: Audit log
+
+**Files:**
+- Create: `audit.py`
+- Create: `tests/test_audit.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_audit.py`:
+
+```python
+import json
+
+import pytest
+
+import audit
+
+
+@pytest.fixture
+def audit_path(tmp_path, monkeypatch):
+    path = tmp_path / "test.jsonl"
+    monkeypatch.setattr(audit, "_log_path", path)
+    audit.reset_session()
+    return path
+
+
+def test_log_turn_writes_jsonl_with_all_fields(audit_path):
+    audit.log_turn(
+        user_message="top 5 in lung",
+        provider="ollama",
+        model="llama3.1:8b",
+        tool_calls=[
+            {"name": "top_genes", "args": {"cancer_name": "lung", "n": 5}, "result": {}}
+        ],
+        final_response="Here are the top 5 ...",
+        step_count=2,
+        step_limit_hit=False,
+    )
+    lines = audit_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    for key in (
+        "ts", "turn", "user_message", "provider", "model",
+        "tool_calls", "final_response", "step_count",
+        "step_limit_hit", "refusal_category", "redacted_patterns",
+    ):
+        assert key in row
+    assert row["refusal_category"] is None
+    assert row["redacted_patterns"] is None
+    assert row["turn"] == 1
+
+
+def test_log_refusal_pii_redacts_user_message(audit_path):
+    audit.log_refusal(
+        category="pii",
+        user_message="contact jane@example.com",
+        patterns=["email"],
+        redacted=True,
+        final_response=audit.__doc__,  # placeholder; what's logged matters
+    )
+    row = json.loads(audit_path.read_text().strip())
+    assert row["refusal_category"] == "pii"
+    assert row["user_message"] == "<redacted>"
+    assert row["redacted_patterns"] == ["email"]
+
+
+def test_log_refusal_clinical_keeps_user_message(audit_path):
+    audit.log_refusal(
+        category="diagnosis",
+        user_message="does this patient have X",
+        patterns=None,
+        redacted=False,
+        final_response="refusal text",
+    )
+    row = json.loads(audit_path.read_text().strip())
+    assert row["refusal_category"] == "diagnosis"
+    assert row["user_message"] == "does this patient have X"
+    assert row["redacted_patterns"] is None
+
+
+def test_turn_counter_increments(audit_path):
+    audit.log_turn(
+        user_message="a", provider="ollama", model="m",
+        tool_calls=[], final_response="x", step_count=0, step_limit_hit=False,
+    )
+    audit.log_turn(
+        user_message="b", provider="ollama", model="m",
+        tool_calls=[], final_response="y", step_count=0, step_limit_hit=False,
+    )
+    rows = [json.loads(l) for l in audit_path.read_text().strip().splitlines()]
+    assert [r["turn"] for r in rows] == [1, 2]
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_audit.py -v`
+Expected: 4 failures (`ModuleNotFoundError: No module named 'audit'`).
+
+- [ ] **Step 3: Implement `audit.py`**
+
+Create `audit.py`:
+
+```python
+"""Append-only JSONL audit log per session.
+
+One file per session, set at app start via init_session(). Records
+every turn — normal or refusal — with a single unified schema.
+Refusals set refusal_category; PII refusals additionally redact
+user_message.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+_log_path: Path | None = None
+_turn_counter: int = 0
+
+
+def init_session(log_dir: Path | str = "logs") -> Path:
+    """Open a new session log file under `log_dir`. Returns the path."""
+    global _log_path, _turn_counter
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    _log_path = log_dir / f"{stamp}.jsonl"
+    _turn_counter = 0
+    return _log_path
+
+
+def reset_session() -> None:
+    """Reset the turn counter without changing the log path. For tests."""
+    global _turn_counter
+    _turn_counter = 0
+
+
+def _write(record: dict) -> None:
+    if _log_path is None:
+        return  # logging not initialised; silently no-op
+    with _log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _next_turn() -> int:
+    global _turn_counter
+    _turn_counter += 1
+    return _turn_counter
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def log_turn(
+    *,
+    user_message: str,
+    provider: str,
+    model: str,
+    tool_calls: list[dict],
+    final_response: str,
+    step_count: int,
+    step_limit_hit: bool,
+) -> None:
+    _write(
+        {
+            "ts": _now_iso(),
+            "turn": _next_turn(),
+            "user_message": user_message,
+            "provider": provider,
+            "model": model,
+            "tool_calls": tool_calls,
+            "final_response": final_response,
+            "step_count": step_count,
+            "step_limit_hit": step_limit_hit,
+            "refusal_category": None,
+            "redacted_patterns": None,
+        }
+    )
+
+
+def log_refusal(
+    *,
+    category: str,
+    user_message: str,
+    patterns: list[str] | None,
+    redacted: bool,
+    final_response: str,
+) -> None:
+    _write(
+        {
+            "ts": _now_iso(),
+            "turn": _next_turn(),
+            "user_message": "<redacted>" if redacted else user_message,
+            "provider": None,
+            "model": None,
+            "tool_calls": [],
+            "final_response": final_response,
+            "step_count": 0,
+            "step_limit_hit": False,
+            "refusal_category": category,
+            "redacted_patterns": patterns,
+        }
+    )
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_audit.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add audit.py tests/test_audit.py
+git commit -m "feat(audit): JSONL per-session audit log with unified schema"
+```
+
+---
+
+## Task 13: Provider base — `Protocol`, dataclasses, `FakeProvider`
+
+**Files:**
+- Create: `providers/base.py`
+- Create: `providers/fake.py`
+- Create: `tests/test_providers_base.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_providers_base.py`:
+
+```python
+from providers.base import Call, ProviderResponse
+from providers.fake import FakeProvider
+
+
+def test_call_dataclass():
+    c = Call(id="x", name="get_targets", args={"cancer_name": "lung"})
+    assert c.id == "x"
+    assert c.name == "get_targets"
+    assert c.args == {"cancer_name": "lung"}
+
+
+def test_provider_response_with_text():
+    r = ProviderResponse(text="hello", function_calls=[], raw_assistant_content={})
+    assert r.text == "hello"
+    assert r.function_calls == []
+
+
+def test_fake_provider_emits_scripted_responses_in_order():
+    script = [
+        ProviderResponse(
+            text=None,
+            function_calls=[Call(id="1", name="list_cancers", args={})],
+            raw_assistant_content={"role": "assistant", "tool_calls": []},
+        ),
+        ProviderResponse(
+            text="done",
+            function_calls=[],
+            raw_assistant_content={"role": "assistant", "content": "done"},
+        ),
+    ]
+    fp = FakeProvider(script=script)
+    r1 = fp.chat([], tools=[])
+    r2 = fp.chat([], tools=[])
+    assert r1.function_calls[0].name == "list_cancers"
+    assert r2.text == "done"
+
+
+def test_fake_provider_raises_when_script_exhausted():
+    fp = FakeProvider(script=[])
+    import pytest
+    with pytest.raises(RuntimeError):
+        fp.chat([], tools=[])
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_providers_base.py -v`
+Expected: failures (`ModuleNotFoundError`).
+
+- [ ] **Step 3: Implement `providers/base.py`**
+
+Create `providers/base.py`:
+
+```python
+"""Provider abstraction.
+
+Each LLM provider implements `chat(history, tools) -> ProviderResponse`.
+The agent loop is provider-agnostic and works in terms of these types.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+@dataclass
+class Call:
+    id: str
+    name: str
+    args: dict
+
+
+@dataclass
+class ProviderResponse:
+    text: str | None
+    function_calls: list[Call]
+    raw_assistant_content: Any  # dict-shaped, in canonical OpenAI form
+
+
+class LLMProvider(Protocol):
+    name: str
+    model: str
+
+    def chat(self, history: list[dict], tools: list[dict]) -> ProviderResponse: ...
+```
+
+- [ ] **Step 4: Implement `providers/fake.py`**
+
+Create `providers/fake.py`:
+
+```python
+"""FakeProvider for agent-loop tests. Emits a scripted sequence of responses."""
+from __future__ import annotations
+
+from typing import Iterable
+
+from providers.base import ProviderResponse
+
+
+class FakeProvider:
+    name = "fake"
+    model = "fake"
+
+    def __init__(self, script: Iterable[ProviderResponse]):
+        self._script = list(script)
+        self._i = 0
+        self.calls: list[tuple[list[dict], list[dict]]] = []
+
+    def chat(self, history: list[dict], tools: list[dict]) -> ProviderResponse:
+        if self._i >= len(self._script):
+            raise RuntimeError("FakeProvider script exhausted")
+        self.calls.append((list(history), list(tools)))
+        resp = self._script[self._i]
+        self._i += 1
+        return resp
+```
+
+- [ ] **Step 5: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_providers_base.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add providers/base.py providers/fake.py tests/test_providers_base.py
+git commit -m "feat(providers): base Protocol + dataclasses + FakeProvider"
+```
+
+---
+
+## Task 14: Provider — Ollama
+
+**Files:**
+- Create: `providers/ollama.py`
+- Create: `tests/test_providers_ollama.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_providers_ollama.py`:
+
+```python
+from unittest.mock import MagicMock
+
+import providers.ollama as ollama_provider
+from providers.base import Call
+
+
+def test_ollama_chat_returns_tool_calls_when_present(monkeypatch):
+    fake_resp = {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "list_cancers",
+                        "arguments": {},
+                    }
+                }
+            ],
+        }
+    }
+    fake_client = MagicMock()
+    fake_client.chat.return_value = fake_resp
+    monkeypatch.setattr(ollama_provider, "_make_client", lambda host: fake_client)
+
+    p = ollama_provider.OllamaProvider(model="llama3.1:8b", host="http://localhost:11434")
+    resp = p.chat(history=[{"role": "user", "content": "hi"}], tools=[])
+
+    assert resp.text is None or resp.text == ""
+    assert len(resp.function_calls) == 1
+    assert isinstance(resp.function_calls[0], Call)
+    assert resp.function_calls[0].name == "list_cancers"
+    assert resp.function_calls[0].args == {}
+
+
+def test_ollama_chat_returns_text_when_no_tool_calls(monkeypatch):
+    fake_resp = {
+        "message": {"role": "assistant", "content": "Hello there"}
+    }
+    fake_client = MagicMock()
+    fake_client.chat.return_value = fake_resp
+    monkeypatch.setattr(ollama_provider, "_make_client", lambda host: fake_client)
+
+    p = ollama_provider.OllamaProvider(model="m", host="http://x")
+    resp = p.chat(history=[{"role": "user", "content": "hi"}], tools=[])
+    assert resp.text == "Hello there"
+    assert resp.function_calls == []
+
+
+def test_ollama_chat_handles_string_arguments(monkeypatch):
+    # Some smaller models return arguments as a JSON string rather than dict
+    fake_resp = {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_targets",
+                        "arguments": '{"cancer_name": "lung"}',
+                    }
+                }
+            ],
+        }
+    }
+    fake_client = MagicMock()
+    fake_client.chat.return_value = fake_resp
+    monkeypatch.setattr(ollama_provider, "_make_client", lambda host: fake_client)
+
+    p = ollama_provider.OllamaProvider(model="m", host="http://x")
+    resp = p.chat(history=[], tools=[])
+    assert resp.function_calls[0].args == {"cancer_name": "lung"}
+
+
+def test_ollama_chat_handles_malformed_arguments(monkeypatch):
+    fake_resp = {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "get_targets", "arguments": "not-json"}}
+            ],
+        }
+    }
+    fake_client = MagicMock()
+    fake_client.chat.return_value = fake_resp
+    monkeypatch.setattr(ollama_provider, "_make_client", lambda host: fake_client)
+
+    p = ollama_provider.OllamaProvider(model="m", host="http://x")
+    resp = p.chat(history=[], tools=[])
+    # Should yield a call with empty args + a flag in raw, so dispatch can
+    # return a bad-arguments error to the model
+    assert resp.function_calls[0].args == {}
+
+
+def test_ollama_chat_handles_unparseable_response(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {}  # totally malformed
+    monkeypatch.setattr(ollama_provider, "_make_client", lambda host: fake_client)
+
+    p = ollama_provider.OllamaProvider(model="m", host="http://x")
+    resp = p.chat(history=[], tools=[])
+    assert resp.text is not None  # must NOT loop silently
+    assert resp.function_calls == []
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_providers_ollama.py -v`
+Expected: failures (`ModuleNotFoundError`).
+
+- [ ] **Step 3: Implement `providers/ollama.py`**
+
+Create `providers/ollama.py`:
+
+```python
+"""Ollama provider — talks to a local Ollama server."""
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any
+
+import ollama
+
+from providers.base import Call, ProviderResponse
+
+
+def _make_client(host: str):
+    """Factory split out so tests can monkeypatch."""
+    return ollama.Client(host=host)
+
+
+class OllamaProvider:
+    name = "ollama"
+
+    def __init__(self, model: str, host: str, temperature: float = 0.0):
+        self.model = model
+        self.host = host
+        self.temperature = temperature
+        self._client = _make_client(host)
+
+    def chat(self, history: list[dict], tools: list[dict]) -> ProviderResponse:
+        try:
+            raw = self._client.chat(
+                model=self.model,
+                messages=history,
+                tools=tools or None,
+                options={"temperature": self.temperature},
+            )
+        except Exception as e:
+            return ProviderResponse(
+                text=f"<provider error: {type(e).__name__}: {e}>",
+                function_calls=[],
+                raw_assistant_content={"role": "assistant", "content": ""},
+            )
+
+        msg = (raw or {}).get("message") or {}
+        content = msg.get("content") or ""
+        tool_calls_raw = msg.get("tool_calls") or []
+
+        if not isinstance(msg, dict) or (not tool_calls_raw and content == "" and not raw):
+            return ProviderResponse(
+                text="<unparseable response>",
+                function_calls=[],
+                raw_assistant_content={"role": "assistant", "content": ""},
+            )
+
+        calls: list[Call] = []
+        for tc in tool_calls_raw:
+            fn = tc.get("function") or {}
+            name = fn.get("name", "")
+            args_raw: Any = fn.get("arguments", {})
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    args = {}
+            elif isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                args = {}
+            calls.append(Call(id=str(uuid.uuid4()), name=name, args=args))
+
+        canonical_assistant = {
+            "role": "assistant",
+            "content": content if not calls else None,
+            "tool_calls": [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": json.dumps(c.args)},
+                }
+                for c in calls
+            ]
+            if calls
+            else None,
+        }
+
+        return ProviderResponse(
+            text=content if not calls else None,
+            function_calls=calls,
+            raw_assistant_content=canonical_assistant,
+        )
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_providers_ollama.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add providers/ollama.py tests/test_providers_ollama.py
+git commit -m "feat(providers): Ollama provider with defensive parsing"
+```
+
+---
+
+## Task 15: Provider — Gemini
+
+**Files:**
+- Create: `providers/gemini.py`
+- Create: `tests/test_providers_gemini.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_providers_gemini.py`:
+
+```python
+import types
+from unittest.mock import MagicMock
+
+import providers.gemini as gemini_provider
+
+
+def _make_fake_response(*, text=None, function_calls=None):
+    """Build a fake genai response object with the shape gemini.py expects."""
+    fc = function_calls or []
+
+    parts = []
+    for name, args in fc:
+        part = MagicMock()
+        part.function_call = MagicMock()
+        part.function_call.name = name
+        # genai returns args as a Mapping-like; here we provide a plain dict
+        part.function_call.args = args
+        parts.append(part)
+    if text is not None:
+        text_part = MagicMock()
+        text_part.function_call = None
+        text_part.text = text
+        parts.append(text_part)
+
+    candidate = MagicMock()
+    candidate.content.parts = parts
+    response = MagicMock()
+    response.candidates = [candidate]
+    return response
+
+
+def test_gemini_chat_returns_text(monkeypatch):
+    fake_model = MagicMock()
+    fake_model.generate_content.return_value = _make_fake_response(text="hello")
+    monkeypatch.setattr(gemini_provider, "_make_model", lambda *a, **k: fake_model)
+
+    p = gemini_provider.GeminiProvider(api_key="x", model="gemini-1.5-flash")
+    resp = p.chat(history=[{"role": "user", "content": "hi"}], tools=[])
+    assert resp.text == "hello"
+    assert resp.function_calls == []
+
+
+def test_gemini_chat_returns_function_call(monkeypatch):
+    fake_model = MagicMock()
+    fake_model.generate_content.return_value = _make_fake_response(
+        function_calls=[("list_cancers", {})]
+    )
+    monkeypatch.setattr(gemini_provider, "_make_model", lambda *a, **k: fake_model)
+
+    p = gemini_provider.GeminiProvider(api_key="x", model="m")
+    resp = p.chat(history=[{"role": "user", "content": "hi"}], tools=[])
+    assert len(resp.function_calls) == 1
+    assert resp.function_calls[0].name == "list_cancers"
+    assert resp.function_calls[0].args == {}
+
+
+def test_gemini_chat_handles_provider_exception(monkeypatch):
+    fake_model = MagicMock()
+    fake_model.generate_content.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(gemini_provider, "_make_model", lambda *a, **k: fake_model)
+
+    p = gemini_provider.GeminiProvider(api_key="x", model="m")
+    resp = p.chat(history=[], tools=[])
+    assert resp.function_calls == []
+    assert "provider error" in (resp.text or "")
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_providers_gemini.py -v`
+Expected: failures (`ModuleNotFoundError`).
+
+- [ ] **Step 3: Implement `providers/gemini.py`**
+
+Create `providers/gemini.py`:
+
+```python
+"""Gemini provider via google-generativeai."""
+from __future__ import annotations
+
+import json
+import uuid
+
+import google.generativeai as genai
+
+from providers.base import Call, ProviderResponse
+
+
+def _make_model(api_key: str, model: str, system_prompt: str, tools: list[dict]):
+    """Factory split out so tests can monkeypatch."""
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name=model,
+        system_instruction=system_prompt or None,
+        tools=[_to_gemini_tools(tools)] if tools else None,
+    )
+
+
+def _to_gemini_tools(tools: list[dict]) -> dict:
+    """Convert our OpenAI-style tool spec to Gemini's function_declarations form."""
+    decls = []
+    for t in tools:
+        fn = t["function"]
+        decls.append(
+            {
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+            }
+        )
+    return {"function_declarations": decls}
+
+
+def _history_to_gemini(history: list[dict]) -> list[dict]:
+    """Convert canonical OpenAI-style history to Gemini Content list.
+
+    Gemini uses 'role' in {'user', 'model', 'function'} and 'parts' lists.
+    """
+    out = []
+    for m in history:
+        role = m["role"]
+        if role == "user":
+            out.append({"role": "user", "parts": [{"text": m["content"]}]})
+        elif role == "assistant":
+            if m.get("tool_calls"):
+                parts = []
+                for tc in m["tool_calls"]:
+                    args = tc["function"]["arguments"]
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                    parts.append(
+                        {"function_call": {"name": tc["function"]["name"], "args": args}}
+                    )
+                out.append({"role": "model", "parts": parts})
+            else:
+                out.append({"role": "model", "parts": [{"text": m.get("content") or ""}]})
+        elif role == "tool":
+            out.append(
+                {
+                    "role": "function",
+                    "parts": [
+                        {
+                            "function_response": {
+                                "name": m["name"],
+                                "response": {"result": _maybe_json(m["content"])},
+                            }
+                        }
+                    ],
+                }
+            )
+    return out
+
+
+def _maybe_json(s):
+    if isinstance(s, str):
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return s
+    return s
+
+
+class GeminiProvider:
+    name = "gemini"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        system_prompt: str = "",
+        temperature: float = 0.0,
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+        self._tools_cache: list[dict] | None = None
+        self._model = None  # built lazily on first call so tools are known
+
+    def _ensure_model(self, tools: list[dict]):
+        if self._model is None or self._tools_cache != tools:
+            self._model = _make_model(self.api_key, self.model, self.system_prompt, tools)
+            self._tools_cache = list(tools)
+        return self._model
+
+    def chat(self, history: list[dict], tools: list[dict]) -> ProviderResponse:
+        model = self._ensure_model(tools)
+        contents = _history_to_gemini(history)
+        try:
+            resp = model.generate_content(
+                contents,
+                generation_config={"temperature": self.temperature},
+            )
+        except Exception as e:
+            return ProviderResponse(
+                text=f"<provider error: {type(e).__name__}: {e}>",
+                function_calls=[],
+                raw_assistant_content={"role": "assistant", "content": ""},
+            )
+
+        function_calls: list[Call] = []
+        text_chunks: list[str] = []
+
+        for cand in getattr(resp, "candidates", []) or []:
+            for part in getattr(cand.content, "parts", []) or []:
+                fc = getattr(part, "function_call", None)
+                if fc and getattr(fc, "name", None):
+                    args = dict(getattr(fc, "args", {}) or {})
+                    function_calls.append(
+                        Call(id=str(uuid.uuid4()), name=fc.name, args=args)
+                    )
+                else:
+                    txt = getattr(part, "text", None)
+                    if txt:
+                        text_chunks.append(txt)
+
+        text = "".join(text_chunks) if text_chunks else None
+
+        canonical_assistant = {
+            "role": "assistant",
+            "content": text if not function_calls else None,
+            "tool_calls": [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": json.dumps(c.args)},
+                }
+                for c in function_calls
+            ]
+            if function_calls
+            else None,
+        }
+
+        return ProviderResponse(
+            text=text,
+            function_calls=function_calls,
+            raw_assistant_content=canonical_assistant,
+        )
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_providers_gemini.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add providers/gemini.py tests/test_providers_gemini.py
+git commit -m "feat(providers): Gemini provider with history + tool translation"
+```
+
+---
+
+## Task 16: Provider — OpenAI
+
+**Files:**
+
+- Create: `providers/openai.py`
+- Create: `tests/test_providers_openai.py`
+
+Our canonical history format is already OpenAI-shaped, so this provider is the thinnest: it passes `history` and `tools` through and parses the response back into `ProviderResponse`.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_providers_openai.py`:
+
+```python
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import providers.openai as openai_provider
+from providers.base import Call
+
+
+def _fake_completion(*, content=None, tool_calls=None):
+    msg = SimpleNamespace(content=content, tool_calls=tool_calls or [])
+    choice = SimpleNamespace(message=msg)
+    return SimpleNamespace(choices=[choice])
+
+
+def _fake_tool_call(name, args_json, id_="call_1"):
+    fn = SimpleNamespace(name=name, arguments=args_json)
+    return SimpleNamespace(id=id_, type="function", function=fn)
+
+
+def test_openai_chat_returns_text(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_completion(content="hello")
+    monkeypatch.setattr(openai_provider, "_make_client", lambda key: fake_client)
+
+    p = openai_provider.OpenAIProvider(api_key="sk-test", model="gpt-4o-mini")
+    resp = p.chat(history=[{"role": "user", "content": "hi"}], tools=[])
+    assert resp.text == "hello"
+    assert resp.function_calls == []
+
+
+def test_openai_chat_returns_tool_calls(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_completion(
+        tool_calls=[_fake_tool_call("get_targets", '{"cancer_name": "lung"}')]
+    )
+    monkeypatch.setattr(openai_provider, "_make_client", lambda key: fake_client)
+
+    p = openai_provider.OpenAIProvider(api_key="sk-test", model="m")
+    resp = p.chat(history=[], tools=[])
+    assert len(resp.function_calls) == 1
+    assert isinstance(resp.function_calls[0], Call)
+    assert resp.function_calls[0].name == "get_targets"
+    assert resp.function_calls[0].args == {"cancer_name": "lung"}
+
+
+def test_openai_chat_handles_malformed_arguments(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_completion(
+        tool_calls=[_fake_tool_call("get_targets", "not-json")]
+    )
+    monkeypatch.setattr(openai_provider, "_make_client", lambda key: fake_client)
+
+    p = openai_provider.OpenAIProvider(api_key="sk-test", model="m")
+    resp = p.chat(history=[], tools=[])
+    assert resp.function_calls[0].args == {}
+
+
+def test_openai_chat_handles_provider_exception(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(openai_provider, "_make_client", lambda key: fake_client)
+
+    p = openai_provider.OpenAIProvider(api_key="sk-test", model="m")
+    resp = p.chat(history=[], tools=[])
+    assert resp.function_calls == []
+    assert "provider error" in (resp.text or "")
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_providers_openai.py -v`
+Expected: failures (`ModuleNotFoundError: No module named 'providers.openai'`).
+
+- [ ] **Step 3: Implement `providers/openai.py`**
+
+Create `providers/openai.py`:
+
+```python
+"""OpenAI provider — uses the openai Python client.
+
+Our canonical history format is already OpenAI-shaped, so this provider
+passes `history` and `tools` through with minimal translation.
+"""
+from __future__ import annotations
+
+import json
+import uuid
+
+from openai import OpenAI
+
+from providers.base import Call, ProviderResponse
+
+
+def _make_client(api_key: str) -> OpenAI:
+    """Factory split out so tests can monkeypatch."""
+    return OpenAI(api_key=api_key)
+
+
+class OpenAIProvider:
+    name = "openai"
+
+    def __init__(self, api_key: str, model: str, temperature: float = 0.0):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+        self._client = _make_client(api_key)
+
+    def chat(self, history: list[dict], tools: list[dict]) -> ProviderResponse:
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                messages=history,
+                tools=tools or None,
+                temperature=self.temperature,
+            )
+        except Exception as e:
+            return ProviderResponse(
+                text=f"<provider error: {type(e).__name__}: {e}>",
+                function_calls=[],
+                raw_assistant_content={"role": "assistant", "content": ""},
+            )
+
+        msg = resp.choices[0].message
+        content = getattr(msg, "content", None) or None
+        tool_calls_raw = getattr(msg, "tool_calls", None) or []
+
+        calls: list[Call] = []
+        for tc in tool_calls_raw:
+            fn = getattr(tc, "function", None)
+            if fn is None:
+                continue
+            name = getattr(fn, "name", "")
+            args_raw = getattr(fn, "arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    args = {}
+            elif isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                args = {}
+            calls.append(
+                Call(id=getattr(tc, "id", str(uuid.uuid4())), name=name, args=args)
+            )
+
+        canonical_assistant = {
+            "role": "assistant",
+            "content": content if not calls else None,
+            "tool_calls": [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": json.dumps(c.args)},
+                }
+                for c in calls
+            ]
+            if calls
+            else None,
+        }
+
+        return ProviderResponse(
+            text=content if not calls else None,
+            function_calls=calls,
+            raw_assistant_content=canonical_assistant,
+        )
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_providers_openai.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add providers/openai.py tests/test_providers_openai.py
+git commit -m "feat(providers): OpenAI provider"
+```
+
+---
+
+## Task 17: Config (system prompt + env loader + provider resolution)
+
+**Files:**
+- Create: `config.py`
+- Create: `tests/test_config.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_config.py`:
+
+```python
+import importlib
+
+
+def test_max_steps_is_8():
+    import config
+    importlib.reload(config)
+    assert config.MAX_STEPS == 8
+
+
+def test_temperature_is_zero():
+    import config
+    importlib.reload(config)
+    assert config.TEMPERATURE == 0.0
+
+
+def test_system_prompt_includes_all_refusal_categories():
+    import config
+    importlib.reload(config)
+    for cat in [
+        "diagnosis", "risk_stratification", "prognosis",
+        "therapeutic_decision_support", "treatment_selection",
+        "clinical_decision_support", "patient_interpretation",
+        "triage", "biomarker_validation", "off_label_inference",
+    ]:
+        assert cat in config.SYSTEM_PROMPT, f"missing category in prompt: {cat}"
+
+
+def test_system_prompt_includes_grounding_rules():
+    import config
+    importlib.reload(config)
+    assert "tool" in config.SYSTEM_PROMPT.lower()
+    assert "invent" in config.SYSTEM_PROMPT.lower()
+    assert "median" in config.SYSTEM_PROMPT.lower()
+
+
+def test_load_provider_config_defaults_to_gemini(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    import config
+    importlib.reload(config)
+    cfg = config.load_provider_config()
+    assert cfg["provider"] == "gemini"
+
+
+def test_load_provider_config_openai(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    import config
+    importlib.reload(config)
+    cfg = config.load_provider_config()
+    assert cfg["provider"] == "openai"
+    assert cfg["openai_api_key"] == "sk-test"
+
+
+def test_build_provider_gemini_with_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
+    import config
+    importlib.reload(config)
+    # Patch out the actual provider construction so we don't hit the network
+    from providers.base import LLMProvider
+    monkeypatch.setattr(
+        "providers.gemini.GeminiProvider",
+        lambda **kw: type("P", (), {"name": "gemini", "model": kw["model"]})(),
+    )
+    p = config.build_provider()
+    assert p.name == "gemini"
+
+
+def test_build_provider_gemini_no_key_falls_back_to_ollama(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    import config
+    importlib.reload(config)
+    monkeypatch.setattr(
+        "providers.ollama.OllamaProvider",
+        lambda **kw: type("P", (), {"name": "ollama", "model": kw["model"], "fallback_reason": None})(),
+    )
+    p = config.build_provider()
+    assert p.name == "ollama"
+    # Fallback reason recorded
+    assert config.LAST_FALLBACK_REASON is not None
+    assert "GEMINI_API_KEY" in config.LAST_FALLBACK_REASON
+
+
+def test_build_provider_openai_no_key_raises(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    import config
+    importlib.reload(config)
+    import pytest
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        config.build_provider()
+
+
+def test_build_provider_explicit_ollama(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    import config
+    importlib.reload(config)
+    monkeypatch.setattr(
+        "providers.ollama.OllamaProvider",
+        lambda **kw: type("P", (), {"name": "ollama", "model": kw["model"]})(),
+    )
+    p = config.build_provider()
+    assert p.name == "ollama"
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_config.py -v`
+Expected: failures (`ModuleNotFoundError`).
+
+- [ ] **Step 3: Implement `config.py`**
+
+Create `config.py`:
+
+```python
+"""Configuration: env loading, system prompt, agent constants."""
+from __future__ import annotations
+
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()  # idempotent; safe in tests
+
+MAX_STEPS = 8
+TEMPERATURE = 0.0
+
+SYSTEM_PROMPT = """\
+You are a research assistant for an internal Owkin take-home dataset.
+The dataset contains population-level MEDIAN expression values for genes
+across 10 cancer indications. The values are NOT individual-patient signals.
+
+HARD RULES — follow these without exception:
+
+1. You answer ONLY from the tool outputs in this conversation. You do not
+   have prior knowledge about which genes belong to which cancers, or about
+   expression values. If a question can't be answered from the tools, say so
+   and suggest a related question that can.
+
+2. If you state a number, it MUST come from a tool result earlier in this
+   conversation. Never invent gene names, cancer types, or numerical values.
+
+3. The values are population-level medians of unspecified cohort and
+   provenance. When comparing or ranking values across cancers, briefly
+   remind the user of this caveat.
+
+4. REFUSE the following question categories. Cite the matched category and
+   offer a redirect to a related dataset question:
+
+   - diagnosis: "does this patient have disease X?"
+   - risk_stratification: "which patients are high risk?"
+   - prognosis: "predict mortality / readmission / survival / progression"
+   - therapeutic_decision_support: "who needs treatment?"
+   - treatment_selection: "which drug should we use?", "rank these drugs"
+   - clinical_decision_support: "recommend the next clinical action"
+   - patient_interpretation: "interpret this lab result / record"
+   - triage: "prioritise these patients"
+   - biomarker_validation: "is gene X a validated target for cancer Y?"
+   - off_label_inference: "does this median value mean drug Z works?"
+
+Available tools:
+- list_cancers — returns the cancer indications in the dataset.
+- get_targets(cancer_name) — list of genes for a cancer (returns an error
+  with did_you_mean suggestions if the cancer is unknown).
+- get_expressions(genes) — median expression values for genes.
+- top_genes(cancer_name, n) — top N genes by expression for a cancer.
+- compare_cancers(cancer_a, cancer_b) — gene set comparison.
+- plot_expressions(expressions, title) — bar chart. Always call
+  get_expressions FIRST and pass its dict as 'expressions'.
+
+When asked "what can you help me with?", briefly describe the dataset
+and call list_cancers() to ground your answer in real data.
+"""
+
+
+# Set when build_provider() falls back from a cloud provider to Ollama.
+# Read by app.py to display a sidebar note.
+LAST_FALLBACK_REASON: str | None = None
+
+
+def load_provider_config() -> dict:
+    """Read provider configuration from environment variables."""
+    provider = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
+    return {
+        "provider": provider,
+        "gemini_api_key": os.environ.get("GEMINI_API_KEY", "").strip(),
+        "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-1.5-flash"),
+        "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
+        "openai_model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        "ollama_model": os.environ.get("OLLAMA_MODEL", "llama3.1:8b"),
+        "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
+    }
+
+
+def _build_ollama(cfg):
+    from providers.ollama import OllamaProvider
+
+    return OllamaProvider(
+        model=cfg["ollama_model"],
+        host=cfg["ollama_host"],
+        temperature=TEMPERATURE,
+    )
+
+
+def build_provider():
+    """Construct the configured provider with fallback semantics.
+
+    Resolution order:
+      1. LLM_PROVIDER=gemini (default) → use Gemini if GEMINI_API_KEY set,
+         else fall back to Ollama (record reason in LAST_FALLBACK_REASON).
+      2. LLM_PROVIDER=openai → require OPENAI_API_KEY (no fallback).
+      3. LLM_PROVIDER=ollama → use Ollama directly.
+    """
+    global LAST_FALLBACK_REASON
+    LAST_FALLBACK_REASON = None
+    cfg = load_provider_config()
+    name = cfg["provider"]
+
+    if name == "gemini":
+        if not cfg["gemini_api_key"]:
+            LAST_FALLBACK_REASON = (
+                "GEMINI_API_KEY is not set — falling back to local Ollama. "
+                "Set GEMINI_API_KEY in .env to use Gemini."
+            )
+            return _build_ollama(cfg)
+        from providers.gemini import GeminiProvider
+
+        return GeminiProvider(
+            api_key=cfg["gemini_api_key"],
+            model=cfg["gemini_model"],
+            system_prompt=SYSTEM_PROMPT,
+            temperature=TEMPERATURE,
+        )
+
+    if name == "openai":
+        if not cfg["openai_api_key"]:
+            raise RuntimeError(
+                "LLM_PROVIDER=openai but OPENAI_API_KEY is not set. "
+                "Set it in .env or switch LLM_PROVIDER=gemini (or ollama)."
+            )
+        from providers.openai import OpenAIProvider
+
+        return OpenAIProvider(
+            api_key=cfg["openai_api_key"],
+            model=cfg["openai_model"],
+            temperature=TEMPERATURE,
+        )
+
+    # name == "ollama" (or any unrecognised value → safest default is local)
+    return _build_ollama(cfg)
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_config.py -v`
+Expected: 6 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add config.py tests/test_config.py
+git commit -m "feat(config): env loader, system prompt with full refusal taxonomy"
+```
+
+---
+
+## Task 18: Agent loop (with safety pre-filters + audit logging)
+
+**Files:**
+- Create: `agent.py`
+- Create: `tests/test_agent_loop.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_agent_loop.py`:
+
+```python
+import json
+
+import pytest
+
+import audit
+import tools
+from agent import AgentResponse, run_turn
+from providers.base import Call, ProviderResponse
+from providers.fake import FakeProvider
+
+
+@pytest.fixture(autouse=True)
+def use_tmp_audit(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "_log_path", tmp_path / "audit.jsonl")
+    audit.reset_session()
+
+
+def _assistant(text=None, calls=None):
+    raw = {"role": "assistant", "content": text, "tool_calls": calls}
+    return ProviderResponse(
+        text=text,
+        function_calls=[Call(id=c["id"], name=c["function"]["name"],
+                             args=json.loads(c["function"]["arguments"]))
+                        for c in (calls or [])],
+        raw_assistant_content=raw,
+    )
+
+
+def _tool_call(name, args, id_="1"):
+    return {
+        "id": id_,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def test_single_text_response_returns_immediately():
+    fp = FakeProvider(script=[_assistant(text="hello")])
+    history = []
+    resp = run_turn(history, "hi", provider=fp, max_steps=8, system_prompt="sys")
+    assert resp.text == "hello"
+    assert resp.trace == []
+    assert resp.refusal_category is None
+
+
+def test_one_tool_call_then_final_answer():
+    fp = FakeProvider(script=[
+        _assistant(calls=[_tool_call("list_cancers", {})]),
+        _assistant(text="There are 10 cancers."),
+    ])
+    history = []
+    resp = run_turn(history, "what cancers", provider=fp, max_steps=8, system_prompt="sys")
+    assert resp.text == "There are 10 cancers."
+    assert len(resp.trace) == 1
+    assert resp.trace[0]["name"] == "list_cancers"
+    assert resp.trace[0]["result"] == tools.list_cancers()
+
+
+def test_step_limit_returns_message():
+    # Always emit a tool call; never produce a final answer
+    looping = [
+        _assistant(calls=[_tool_call("list_cancers", {}, id_=str(i))])
+        for i in range(20)
+    ]
+    fp = FakeProvider(script=looping)
+    resp = run_turn([], "loop", provider=fp, max_steps=3, system_prompt="sys")
+    assert "step" in resp.text.lower() or "ran out" in resp.text.lower()
+    assert len(resp.trace) == 3
+
+
+def test_pii_refusal_skips_provider(monkeypatch):
+    # Provider would raise if reached
+    fp = FakeProvider(script=[])  # empty script — any call raises
+    resp = run_turn(
+        [], "contact jane@example.com", provider=fp, max_steps=8, system_prompt="sys"
+    )
+    assert resp.refusal_category == "pii"
+    assert "patient" in resp.text.lower()
+    # Provider was not called
+    assert fp.calls == []
+
+
+def test_clinical_refusal_skips_provider():
+    fp = FakeProvider(script=[])
+    resp = run_turn(
+        [], "Which patients are high risk?", provider=fp, max_steps=8, system_prompt="sys"
+    )
+    assert resp.refusal_category == "risk_stratification"
+    assert fp.calls == []
+
+
+def test_parallel_tool_calls_in_one_step():
+    fp = FakeProvider(script=[
+        _assistant(calls=[
+            _tool_call("get_targets", {"cancer_name": "lung"}, id_="a"),
+            _tool_call("get_targets", {"cancer_name": "breast"}, id_="b"),
+        ]),
+        _assistant(text="done"),
+    ])
+    resp = run_turn([], "compare", provider=fp, max_steps=8, system_prompt="sys")
+    assert len(resp.trace) == 2
+    assert resp.trace[0]["name"] == "get_targets"
+    assert resp.trace[1]["name"] == "get_targets"
+
+
+def test_plot_expressions_yields_figure():
+    fp = FakeProvider(script=[
+        _assistant(calls=[_tool_call(
+            "plot_expressions",
+            {"expressions": {"X": 0.5}, "title": "t"},
+        )]),
+        _assistant(text="here is the chart"),
+    ])
+    resp = run_turn([], "plot", provider=fp, max_steps=8, system_prompt="sys")
+    assert len(resp.figures) == 1
+
+
+def test_audit_log_written_on_normal_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "_log_path", tmp_path / "a.jsonl")
+    audit.reset_session()
+    fp = FakeProvider(script=[_assistant(text="ok")])
+    run_turn([], "hi", provider=fp, max_steps=8, system_prompt="sys")
+    line = (tmp_path / "a.jsonl").read_text().strip()
+    row = json.loads(line)
+    assert row["refusal_category"] is None
+    assert row["final_response"] == "ok"
+
+
+def test_audit_log_redacts_pii_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "_log_path", tmp_path / "a.jsonl")
+    audit.reset_session()
+    fp = FakeProvider(script=[])
+    run_turn(
+        [], "contact jane@example.com", provider=fp, max_steps=8, system_prompt="sys"
+    )
+    row = json.loads((tmp_path / "a.jsonl").read_text().strip())
+    assert row["refusal_category"] == "pii"
+    assert row["user_message"] == "<redacted>"
+    assert "email" in row["redacted_patterns"]
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run: `python -m pytest tests/test_agent_loop.py -v`
+Expected: failures (`ModuleNotFoundError: No module named 'agent'`).
+
+- [ ] **Step 3: Implement `agent.py`**
+
+Create `agent.py`:
+
+```python
+"""Provider-agnostic agent loop with safety pre-filters and audit logging."""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+import audit
+import safety
+import tools as toolkit
+from providers.base import LLMProvider, ProviderResponse
+
+
+@dataclass
+class AgentResponse:
+    text: str
+    figures: list[Any] = field(default_factory=list)
+    trace: list[dict] = field(default_factory=list)
+    refusal_category: str | None = None
+
+
+_STEP_LIMIT_MSG = (
+    "The agent reached its step limit before producing a final answer. "
+    "Try a more specific question, or break it into smaller steps."
+)
+
+
+def run_turn(
+    history: list[dict],
+    user_message: str,
+    *,
+    provider: LLMProvider,
+    max_steps: int,
+    system_prompt: str,
+) -> AgentResponse:
+    # --- Safety pre-filters run BEFORE any LLM call. ---
+    pii = safety.detect_pii(user_message)
+    if pii.matched:
+        audit.log_refusal(
+            category="pii",
+            user_message=user_message,
+            patterns=pii.patterns,
+            redacted=True,
+            final_response=safety.PII_REFUSAL,
+        )
+        return AgentResponse(
+            text=safety.PII_REFUSAL, refusal_category="pii"
+        )
+
+    clinical = safety.detect_clinical_question(user_message)
+    if clinical.matched:
+        refusal_text = safety.refusal_for(clinical.category)
+        audit.log_refusal(
+            category=clinical.category,
+            user_message=user_message,
+            patterns=None,
+            redacted=False,
+            final_response=refusal_text,
+        )
+        return AgentResponse(text=refusal_text, refusal_category=clinical.category)
+
+    # --- Main agent loop. ---
+    if not history or history[0].get("role") != "system":
+        history.insert(0, {"role": "system", "content": system_prompt})
+    history.append({"role": "user", "content": user_message})
+
+    figures: list[Any] = []
+    trace: list[dict] = []
+    step = 0
+    final_text: str | None = None
+
+    for step in range(1, max_steps + 1):
+        resp: ProviderResponse = provider.chat(history, toolkit.TOOL_SPEC)
+
+        if not resp.function_calls:
+            history.append(resp.raw_assistant_content)
+            final_text = resp.text or ""
+            break
+
+        history.append(resp.raw_assistant_content)
+        for call in resp.function_calls:
+            result, fig = toolkit.dispatch(call.name, call.args)
+            if fig is not None:
+                figures.append(fig)
+            trace.append({"name": call.name, "args": call.args, "result": _safe_json(result)})
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": json.dumps(_safe_json(result)),
+                }
+            )
+    else:
+        final_text = _STEP_LIMIT_MSG
+
+    step_limit_hit = final_text == _STEP_LIMIT_MSG
+
+    audit.log_turn(
+        user_message=user_message,
+        provider=getattr(provider, "name", "?"),
+        model=getattr(provider, "model", "?"),
+        tool_calls=trace,
+        final_response=final_text or "",
+        step_count=step,
+        step_limit_hit=step_limit_hit,
+    )
+
+    return AgentResponse(
+        text=final_text or "",
+        figures=figures,
+        trace=trace,
+    )
+
+
+def _safe_json(obj):
+    """Best-effort coerce a tool result to a JSON-serialisable structure."""
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return {"_repr": repr(obj)}
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run: `python -m pytest tests/test_agent_loop.py -v`
+Expected: 9 passed.
+
+- [ ] **Step 5: Full test suite check**
+
+Run: `python -m pytest -q`
+Expected: all tests passing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add agent.py tests/test_agent_loop.py
+git commit -m "feat(agent): agent loop with safety pre-filters and audit logging"
+```
+
+---
+
+## Task 19: Streamlit UI
+
+**Files:**
+- Create: `app.py`
+
+This task has no automated tests — Streamlit is exercised by a manual smoke test at the end.
+
+- [ ] **Step 1: Create `app.py`**
+
+```python
+"""Streamlit chat UI for the Owkin take-home agent."""
+from __future__ import annotations
+
+import streamlit as st
+
+import audit
+import config
+from agent import run_turn
+
+BANNER = (
+    "Research tool only — not a medical device. "
+    "Not for diagnosis, prognosis, or treatment decisions."
+)
+
+INTENDED_USE = (
+    "**Intended use.** Research and exploration tool for an internal Owkin "
+    "take-home dataset of population-level gene expression medians. "
+    "**Not a medical device.** Not for diagnosis, prognosis, risk "
+    "stratification, treatment selection, drug recommendation, clinical "
+    "decision support, individual-patient interpretation, triage, or "
+    "biomarker validation."
+)
+
+WELCOME = (
+    "Hi — I'm a data agent for the gene/cancer dataset (10 cancer types, "
+    "expression medians). **Heads up:** values shown are population-level "
+    "medians of unspecified cohort and provenance — not individual-patient "
+    "signals.\n\n"
+    "Try: 'What targets are in lung cancer?', 'Compare breast and prostate', "
+    "'Top 5 genes in pancreatic'."
+)
+
+
+def _init_session():
+    if "audit_initialised" not in st.session_state:
+        audit.init_session("logs")
+        st.session_state.audit_initialised = True
+    if "history" not in st.session_state:
+        st.session_state.history = []
+        st.session_state.display = []  # list of dicts for chat rendering
+    if "safety_ack" not in st.session_state:
+        st.session_state.safety_ack = False
+    if "provider" not in st.session_state:
+        st.session_state.provider = config.build_provider()
+
+
+def _reset_conversation():
+    st.session_state.history = []
+    st.session_state.display = []
+    st.session_state.safety_ack = False
+    audit.init_session("logs")
+    st.session_state.audit_initialised = True
+
+
+def _render_sidebar():
+    with st.sidebar:
+        st.markdown("### About")
+        st.markdown(INTENDED_USE)
+        provider = st.session_state.provider
+        st.markdown(
+            f"**Active LLM:** `{provider.name}` (`{provider.model}`)"
+        )
+        if config.LAST_FALLBACK_REASON:
+            st.info(config.LAST_FALLBACK_REASON, icon="ℹ️")
+        if st.button("New conversation", use_container_width=True):
+            _reset_conversation()
+            st.rerun()
+
+
+def _render_safety_modal():
+    st.warning(BANNER)
+    with st.container(border=True):
+        st.markdown("### Before you start")
+        st.markdown(INTENDED_USE)
+        if st.button("I understand — this is a research tool only", type="primary"):
+            st.session_state.safety_ack = True
+            st.session_state.display.append({"role": "assistant", "text": WELCOME})
+            st.rerun()
+
+
+def _render_history():
+    for msg in st.session_state.display:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["text"])
+            for fig in msg.get("figures", []) or []:
+                st.pyplot(fig, clear_figure=False)
+            trace = msg.get("trace") or []
+            if trace:
+                with st.expander("Tool calls"):
+                    for i, call in enumerate(trace, 1):
+                        st.markdown(f"**{i}. `{call['name']}`**")
+                        st.json({"args": call["args"], "result": call["result"]})
+            if msg.get("refusal_category"):
+                with st.expander("Why this was refused"):
+                    st.markdown(
+                        f"Category: `{msg['refusal_category']}`. "
+                        f"See the README for the full refusal taxonomy."
+                    )
+
+
+def main():
+    st.set_page_config(page_title="Owkin Data Agent", page_icon=":dna:")
+    _init_session()
+
+    st.markdown(f":red-background[{BANNER}]")
+    st.title("Owkin Data Agent")
+
+    _render_sidebar()
+
+    if not st.session_state.safety_ack:
+        _render_safety_modal()
+        return
+
+    _render_history()
+
+    user_message = st.chat_input("Ask about the dataset")
+    if not user_message:
+        return
+
+    st.session_state.display.append({"role": "user", "text": user_message})
+    with st.spinner("Thinking..."):
+        resp = run_turn(
+            st.session_state.history,
+            user_message,
+            provider=st.session_state.provider,
+            max_steps=config.MAX_STEPS,
+            system_prompt=config.SYSTEM_PROMPT,
+        )
+    st.session_state.display.append(
+        {
+            "role": "assistant",
+            "text": resp.text,
+            "figures": resp.figures,
+            "trace": resp.trace,
+            "refusal_category": resp.refusal_category,
+        }
+    )
+    st.rerun()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Manual smoke test**
+
+Pre-req for the **default** path: set `GEMINI_API_KEY` in `.env`. Or for the **local fallback** path: install Ollama and run `ollama pull llama3.1:8b`.
+
+Run: `python -m streamlit run app.py`
+
+In the browser:
+
+1. Acknowledge the safety modal.
+2. Confirm the sidebar shows the active provider; if Gemini key is missing, it should say "Using Ollama (GEMINI_API_KEY missing)".
+3. Ask "what cancers do you cover?" — should produce a list via `list_cancers`.
+4. Ask "top 5 in lung" — should produce a sorted list via `top_genes`.
+5. Ask "plot expressions for the top 3 in breast" — should orchestrate `top_genes`, `get_expressions`, `plot_expressions` and render a bar chart inline.
+6. Ask "Which patients are high risk?" — should refuse with category `risk_stratification`.
+7. Ask "What about esophageal?" — should return the `did_you_mean` / `available` path.
+8. Type "contact jane@example.com" — should refuse with the PII message.
+
+Check `logs/<timestamp>.jsonl` exists and contains one line per turn.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app.py
+git commit -m "feat(ui): Streamlit chat with banner, modal, trace, refusal rendering"
+```
+
+---
+
+## Task 20: Dockerfile and docker-compose
+
+**Files:**
+- Create: `Dockerfile`
+- Create: `docker-compose.yml`
+- Create: `.dockerignore`
+
+- [ ] **Step 1: Create `Dockerfile`**
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps for matplotlib
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libfreetype6 libpng16-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+```
+
+- [ ] **Step 2: Create `.dockerignore`**
+
+```text
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.git
+logs
+.env
+docs
+```
+
+- [ ] **Step 3: Create `docker-compose.yml`**
+
+```yaml
+services:
+  agent:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      # All provider env vars flow through from .env (env_file above).
+      # For the Ollama path, OLLAMA_HOST defaults to host.docker.internal
+      # so the container can reach Ollama running on the host.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - ./logs:/app/logs
+```
+
+- [ ] **Step 4: Smoke-test the image build**
+
+Run: `docker build -t owkin-agent .`
+Expected: image builds without error.
+
+(Full `docker compose up` smoke is documented in the README and exercised by the reviewer.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Dockerfile docker-compose.yml .dockerignore
+git commit -m "feat(docker): Dockerfile and docker-compose for portable runs"
+```
+
+---
+
+## Task 21: README
+
+**Files:**
+- Create: `README.md`
+
+- [ ] **Step 1: Create `README.md`**
+
+```markdown
+# Owkin Take-Home — Agentic Data Assistant
+
+A Streamlit chat agent that lets a non-technical stakeholder query a small
+gene/cancer expression dataset in natural language. The agent orchestrates
+six tools over the dataset via an LLM (**Gemini cloud by default**, Ollama
+local as fallback, OpenAI as opt-in), with pre-LLM safety filters, an audit
+log, and a strict refusal taxonomy.
+
+---
+
+## Intended use and limitations
+
+**Research and exploration tool only.** Operates on a small de-identified
+research dataset of population-level gene expression medians.
+
+**Not a medical device.** The agent refuses any question that falls into
+the following categories:
+
+| Category | Example shape |
+| --- | --- |
+| diagnosis | "Does this patient have disease X?" |
+| risk_stratification | "Which patients are high risk?" |
+| prognosis | "Predict mortality / readmission / survival." |
+| therapeutic_decision_support | "Who needs treatment?" |
+| treatment_selection | "Which drug should we use?" / "Rank these drugs." |
+| clinical_decision_support | "Recommend the next clinical action." |
+| patient_interpretation | "Interpret this lab result." |
+| triage | "Prioritise these patients." |
+| biomarker_validation | "Is gene X a validated target for Y?" |
+| off_label_inference | "Does this median mean drug Z works?" |
+
+The agent also refuses any input containing patient-identifiable data
+(emails, phone numbers, dates of birth, MRN-like patterns, name-adjacent
+clinical phrasing). PII detection is best-effort, not a clinical-grade DLP.
+
+---
+
+## Provider modes
+
+| `LLM_PROVIDER` | Behaviour | Required env |
+| --- | --- | --- |
+| `gemini` (default) | Use Gemini if `GEMINI_API_KEY` set; **fall back to local Ollama** if not. | `GEMINI_API_KEY` (optional) |
+| `openai` (opt-in) | Use OpenAI. Missing key is a config error (no fallback). | `OPENAI_API_KEY` |
+| `ollama` (explicit local) | Always use local Ollama. The privacy-preserving mode. | Ollama installed locally |
+
+> Privacy note: the default sends prompts + tool results to Google. The
+> dataset itself is not transmitted. For a fully local run, set
+> `LLM_PROVIDER=ollama` or simply leave `GEMINI_API_KEY` blank.
+
+## Quick start (Docker)
+
+1. Copy the env template:
+
+   ```
+   cp .env.example .env
+   ```
+
+2. Pick a provider:
+   - **Gemini (default):** put your `GEMINI_API_KEY` in `.env`.
+   - **OpenAI (opt-in):** set `LLM_PROVIDER=openai` and `OPENAI_API_KEY`.
+   - **Ollama (local):** set `LLM_PROVIDER=ollama` (or leave keys blank).
+     Install [Ollama](https://ollama.com/) and `ollama pull llama3.1:8b`.
+
+3. Build and run:
+
+   ```
+   docker compose up --build
+   ```
+
+4. Open http://localhost:8501.
+
+On Linux hosts using the Ollama path, replace `host.docker.internal` with
+your host's IP in `docker-compose.yml` (or use
+`--add-host=host.docker.internal:host-gateway`).
+
+## Quick start (without Docker)
+
+```
+python -m venv .venv
+. .venv/Scripts/activate    # Windows
+# or: source .venv/bin/activate   # macOS / Linux
+pip install -r requirements.txt
+cp .env.example .env
+streamlit run app.py
+```
+
+## Switching providers at runtime
+
+Edit `.env` and restart the app. The sidebar shows which provider is
+actually active — if `LLM_PROVIDER=gemini` but no key is set, the sidebar
+will say "Using Ollama (GEMINI_API_KEY missing)".
+
+## Example questions
+
+In scope (the agent will answer):
+- "What can you help me with?"
+- "What cancers do you cover?"
+- "What are the targets for lung cancer?"
+- "Show median expression for the genes in breast."
+- "Top 5 genes by expression in pancreatic cancer."
+- "Compare breast and prostate."
+- "Plot the top 3 expressions in glioblastoma."
+
+Unknown cancer (graceful handling):
+- "What about esophageal cancer?" → returns `did_you_mean` / `available`.
+
+Refused (with category):
+- "Which patients are high risk?" → `risk_stratification`
+- "Recommend the next clinical action." → `clinical_decision_support`
+- "Interpret this lab result." → `patient_interpretation`
+- "Contact jane@example.com about this." → PII refusal.
+
+## Design choices
+
+- **Native function calling, not prompt-and-parse.** Both providers expose
+  structured tool calling; we use it directly. Less brittle than parsing
+  JSON out of free-form text.
+- **Provider abstraction.** The agent loop is provider-agnostic. Each
+  provider owns translation between our canonical OpenAI-style history and
+  its native format.
+- **Tools as the source of truth.** The model has no prior knowledge in
+  scope. Numbers come from tool results; unknown inputs return structured
+  errors (`did_you_mean` / `available`) so the model can self-correct.
+- **Five anti-hallucination layers.** Hard rules in the system prompt;
+  `temperature=0`; tools-only data; bounded loop (`MAX_STEPS=8`); visible
+  tool-call trace in the UI.
+- **Two-line safety posture.** Pre-LLM regex filters (PII + clinical
+  taxonomy) plus the system-prompt taxonomy. Defense in depth.
+- **Audit log.** One JSONL file per session in `logs/`, with a unified
+  schema. Used for reproducibility and traceability.
+
+## Audit log
+
+Each chat session writes one append-only file: `logs/YYYY-MM-DDTHHMMSSZ.jsonl`.
+One line per turn (normal or refusal). Schema:
+
+```json
+{
+  "ts": "2026-05-14T12:34:56.789Z",
+  "turn": 3,
+  "user_message": "top 5 in lung",
+  "provider": "gemini",
+  "model": "gemini-1.5-flash",
+  "tool_calls": [{"name": "...", "args": {...}, "result": {...}}],
+  "final_response": "...",
+  "step_count": 2,
+  "step_limit_hit": false,
+  "refusal_category": null,
+  "redacted_patterns": null
+}
+```
+
+The log contains conversation text — don't share it without review. PII
+refusals redact `user_message` to `<redacted>` and list matched patterns
+in `redacted_patterns`.
+
+## Testing
+
+```
+python -m pytest -q
+```
+
+All tests are offline (no network). Coverage:
+- `tests/test_data.py` — dataset loader
+- `tests/test_tools.py` — six tools + dispatch + TOOL_SPEC
+- `tests/test_safety.py` — PII patterns + clinical taxonomy gold cases
+- `tests/test_audit.py` — JSONL log shape + PII redaction
+- `tests/test_providers_base.py` / `_ollama.py` / `_gemini.py` / `_openai.py` —
+  provider translation with mocked clients
+- `tests/test_agent_loop.py` — full agent loop with `FakeProvider`
+- `tests/test_config.py` — env loading + fallback resolution + system prompt content
+
+## Limitations and next steps
+
+Out of scope for this POC, but the right shape for them is in place:
+- Replace regex-based safety filters with validated classifiers.
+- Tamper-evident audit log with retention policy.
+- Label data-grounded vs general-knowledge answers with a domain expert in
+  the loop, rather than hard-refusing all general biology.
+- Streaming responses.
+- Evaluation harness with gold-standard Q&A pairs.
+- Persistence beyond the running process.
+- QMS alignment if any clinical use is ever contemplated.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: README with intended use, quick start, and design notes"
+```
+
+---
+
+## Final verification
+
+- [ ] **Step 1: Full test suite green**
+
+Run: `python -m pytest -q`
+Expected: all tests pass, no network, runs in under ~5s.
+
+- [ ] **Step 2: Manual smoke test (Ollama path)**
+
+Pre-req: Ollama running locally with `llama3.1:8b` pulled.
+
+Run: `python -m streamlit run app.py`
+
+Walk through the checklist from Task 19 Step 2 (in-scope, unknown, refused, PII).
+
+- [ ] **Step 3: Manual smoke test (Docker)**
+
+Run: `docker compose up --build`
+Open http://localhost:8501 and repeat the smoke test.
+
+- [ ] **Step 4: Tag the POC**
+
+```bash
+git tag -a v0.1.0 -m "POC ready for review"
+```
+
+---
+
+## Spec coverage check
+
+| Spec section | Implemented by |
+| --- | --- |
+| §1 Goals / non-goals | Tasks 1–21 |
+| §2 Dataset | Task 2 |
+| §3 Architecture | Tasks 18 (loop), 19 (UI), 10–11 (safety), 12 (audit), 13–16 (providers), 3–9 (tools), 2 (data) |
+| §4 File layout | Task 1 (scaffold) + per-file tasks |
+| §5 Tool contracts | Tasks 3–9 |
+| §6 Agent loop | Task 18 |
+| §7 Grounding / anti-hallucination | Task 17 (system prompt), Task 18 (bounded loop, tool trace) |
+| §7.5 Scope / ethics | Tasks 10–11 (filters), Task 12 (audit), Task 17 (prompt taxonomy), Task 19 (UI banner/modal/welcome caveat) |
+| §8 Provider abstraction | Tasks 13 (base + FakeProvider), 14 (Ollama), 15 (Gemini), 16 (OpenAI), 17 (build_provider resolution + fallback) |
+| §9 UI behaviour | Task 19 |
+| §10 Configuration | Tasks 1, 17 |
+| §11 Testing | Tasks 2–18 (each task ships its own tests) |
+| §12 Docker | Task 20 |
+| §13 README | Task 21 |
+| §14 Checklist | Verified throughout (final verification step) |

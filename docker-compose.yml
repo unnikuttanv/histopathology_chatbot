@@ -1,0 +1,14 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      # All provider env vars flow through from .env (env_file above).
+      # For the Ollama path, OLLAMA_HOST defaults to host.docker.internal
+      # so the container can reach Ollama running on the host.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - ./logs:/app/logs
