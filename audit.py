@@ -60,6 +60,7 @@ def log_turn(
     final_response: str,
     step_count: int,
     step_limit_hit: bool,
+    actual_model: str | None = None,
 ) -> None:
     _write(
         {
@@ -68,6 +69,7 @@ def log_turn(
             "user_message": user_message,
             "provider": provider,
             "model": model,
+            "actual_model": actual_model,  # null if call failed before a response.
             "tool_calls": tool_calls,
             "final_response": final_response,
             "step_count": step_count,
@@ -93,6 +95,7 @@ def log_refusal(
             "user_message": "<redacted>" if redacted else user_message,
             "provider": None,
             "model": None,
+            "actual_model": None,
             "tool_calls": [],
             "final_response": final_response,
             "step_count": 0,

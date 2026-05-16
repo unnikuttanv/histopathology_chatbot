@@ -29,7 +29,7 @@ def test_log_turn_writes_jsonl_with_all_fields(audit_path):
     assert len(lines) == 1
     row = json.loads(lines[0])
     for key in (
-        "ts", "turn", "user_message", "provider", "model",
+        "ts", "turn", "user_message", "provider", "model", "actual_model",
         "tool_calls", "final_response", "step_count",
         "step_limit_hit", "refusal_category", "redacted_patterns",
     ):

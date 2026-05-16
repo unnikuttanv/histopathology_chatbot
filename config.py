@@ -88,11 +88,12 @@ def load_provider_config() -> dict:
 
 
 def _build_ollama(cfg):
-    from providers.ollama import OllamaProvider
+    from providers.litellm_provider import LiteLLMProvider
 
-    return OllamaProvider(
-        model=cfg["ollama_model"],
-        host=cfg["ollama_host"],
+    return LiteLLMProvider(
+        model=f"ollama_chat/{cfg['ollama_model']}",
+        name="ollama",
+        api_base=cfg["ollama_host"],
         temperature=TEMPERATURE,
     )
 
@@ -102,10 +103,15 @@ def build_provider():
 
     Resolution order:
       1. LLM_PROVIDER=gemini (default) → use Gemini if GEMINI_API_KEY set,
-         else fall back to Ollama (record reason in LAST_FALLBACK_REASON).
+         else fall back to Ollama at startup (record reason in
+         LAST_FALLBACK_REASON). When Gemini IS configured, Ollama is also
+         wired as a runtime fallback for transient errors (overload/rate
+         limit/timeout) — handled automatically by LiteLLM.
       2. LLM_PROVIDER=openai → require OPENAI_API_KEY (no fallback).
       3. LLM_PROVIDER=ollama → use Ollama directly.
     """
+    from providers.litellm_provider import LiteLLMProvider
+
     global LAST_FALLBACK_REASON
     LAST_FALLBACK_REASON = None
     cfg = load_provider_config()
@@ -118,12 +124,17 @@ def build_provider():
                 "Set GEMINI_API_KEY in .env to use Gemini."
             )
             return _build_ollama(cfg)
-        from providers.gemini import GeminiProvider
-
-        return GeminiProvider(
+        # LiteLLM's dict-form fallback applies api_base to the PRIMARY call
+        # too, sending Gemini retries to Ollama's host (cross-provider bug).
+        # Workaround: set OLLAMA_API_BASE env var globally — litellm reads it
+        # for any ollama_chat call — and use a bare-string fallback so litellm
+        # doesn't override the primary's api_base.
+        os.environ["OLLAMA_API_BASE"] = cfg["ollama_host"]
+        return LiteLLMProvider(
+            model=f"gemini/{cfg['gemini_model']}",
+            name="gemini",
             api_key=cfg["gemini_api_key"],
-            model=cfg["gemini_model"],
-            system_prompt=SYSTEM_PROMPT,
+            fallbacks=[f"ollama_chat/{cfg['ollama_model']}"],
             temperature=TEMPERATURE,
         )
 
@@ -133,11 +144,10 @@ def build_provider():
                 "LLM_PROVIDER=openai but OPENAI_API_KEY is not set. "
                 "Set it in .env or switch LLM_PROVIDER=gemini (or ollama)."
             )
-        from providers.openai import OpenAIProvider
-
-        return OpenAIProvider(
+        return LiteLLMProvider(
+            model=f"openai/{cfg['openai_model']}",
+            name="openai",
             api_key=cfg["openai_api_key"],
-            model=cfg["openai_model"],
             temperature=TEMPERATURE,
         )
 

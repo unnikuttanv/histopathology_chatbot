@@ -21,6 +21,8 @@ class ProviderResponse:
     text: str | None
     function_calls: list[Call]
     raw_assistant_content: Any  # dict-shaped, in canonical OpenAI form
+    actual_model: str | None = None  # The model that actually served the response
+    # (may differ from the configured one when a fallback ran).
 
 
 class LLMProvider(Protocol):

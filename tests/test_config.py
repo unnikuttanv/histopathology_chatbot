@@ -58,12 +58,16 @@ def test_build_provider_gemini_with_key(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
     import config
     importlib.reload(config)
-    monkeypatch.setattr(
-        "providers.gemini.GeminiProvider",
-        lambda **kw: type("P", (), {"name": "gemini", "model": kw["model"]})(),
-    )
+    import os
     p = config.build_provider()
     assert p.name == "gemini"
+    assert p.model.startswith("gemini/")
+    assert p.api_key == "sk-test"
+    # Runtime fallback wired as bare-string. Per-fallback api_base is set
+    # via OLLAMA_API_BASE env var because LiteLLM's dict-form fallback
+    # incorrectly applies api_base to the primary call too.
+    assert p.fallbacks == [f"ollama_chat/{config.load_provider_config()['ollama_model']}"]
+    assert os.environ.get("OLLAMA_API_BASE")
 
 
 def test_build_provider_gemini_no_key_falls_back_to_ollama(monkeypatch):
@@ -71,12 +75,9 @@ def test_build_provider_gemini_no_key_falls_back_to_ollama(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     import config
     importlib.reload(config)
-    monkeypatch.setattr(
-        "providers.ollama.OllamaProvider",
-        lambda **kw: type("P", (), {"name": "ollama", "model": kw["model"]})(),
-    )
     p = config.build_provider()
     assert p.name == "ollama"
+    assert p.model.startswith("ollama_chat/")
     assert config.LAST_FALLBACK_REASON is not None
     assert "GEMINI_API_KEY" in config.LAST_FALLBACK_REASON
 
@@ -90,13 +91,23 @@ def test_build_provider_openai_no_key_raises(monkeypatch):
         config.build_provider()
 
 
+def test_build_provider_openai_with_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    import config
+    importlib.reload(config)
+    p = config.build_provider()
+    assert p.name == "openai"
+    assert p.model.startswith("openai/")
+    assert p.api_key == "sk-test"
+    assert p.fallbacks == []  # openai mode has no auto-fallback
+
+
 def test_build_provider_explicit_ollama(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     import config
     importlib.reload(config)
-    monkeypatch.setattr(
-        "providers.ollama.OllamaProvider",
-        lambda **kw: type("P", (), {"name": "ollama", "model": kw["model"]})(),
-    )
     p = config.build_provider()
     assert p.name == "ollama"
+    assert p.model.startswith("ollama_chat/")
+    assert p.api_base  # always wired for ollama

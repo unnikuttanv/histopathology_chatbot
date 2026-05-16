@@ -85,6 +85,8 @@ def _render_safety_modal():
 
 
 def _render_history():
+    configured = st.session_state.get("provider")
+    configured_model = getattr(configured, "model", None) if configured else None
     for msg in st.session_state.display:
         with st.chat_message(msg["role"]):
             st.markdown(msg["text"])
@@ -102,6 +104,14 @@ def _render_history():
                         f"Category: `{msg['refusal_category']}`. "
                         f"See the README for the full refusal taxonomy."
                     )
+            actual = msg.get("actual_model")
+            if actual:
+                # Mark fallback explicitly when the model that answered isn't
+                # the one we configured (litellm prefixes the configured model
+                # with the provider, so compare loosely).
+                is_fallback = configured_model and actual not in configured_model
+                tag = " *(fallback)*" if is_fallback else ""
+                st.caption(f"Answered by `{actual}`{tag}")
 
 
 def main():
@@ -146,6 +156,7 @@ def main():
             "figures": resp.figures,
             "trace": resp.trace,
             "refusal_category": resp.refusal_category,
+            "actual_model": resp.actual_model,
         }
     )
     st.rerun()

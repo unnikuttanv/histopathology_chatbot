@@ -17,6 +17,7 @@ class AgentResponse:
     figures: list[Any] = field(default_factory=list)
     trace: list[dict] = field(default_factory=list)
     refusal_category: str | None = None
+    actual_model: str | None = None  # Model that produced the final answer.
 
 
 _STEP_LIMIT_MSG = (
@@ -65,11 +66,15 @@ def run_turn(
     figures: list[Any] = []
     trace: list[dict] = []
     final_text: str | None = None
+    actual_model: str | None = None
     step = 0
     step_limit_hit = False
 
     for step in range(1, max_steps + 1):
         resp: ProviderResponse = provider.chat(history, toolkit.TOOL_SPEC)
+        # Track the actual model from the most recent response — this is the
+        # one that produced the final answer (or the last tool call).
+        actual_model = resp.actual_model or actual_model
 
         if not resp.function_calls:
             history.append(resp.raw_assistant_content)
@@ -100,13 +105,19 @@ def run_turn(
         user_message=user_message,
         provider=getattr(provider, "name", "?"),
         model=getattr(provider, "model", "?"),
+        actual_model=actual_model,
         tool_calls=trace,
         final_response=final_text or "",
         step_count=step,
         step_limit_hit=step_limit_hit,
     )
 
-    return AgentResponse(text=final_text or "", figures=figures, trace=trace)
+    return AgentResponse(
+        text=final_text or "",
+        figures=figures,
+        trace=trace,
+        actual_model=actual_model,
+    )
 
 
 def _safe_json(obj):
