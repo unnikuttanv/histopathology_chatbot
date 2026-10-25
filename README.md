@@ -6,6 +6,13 @@ six tools over the dataset via an LLM (**Gemini cloud by default**, Ollama
 local as fallback, OpenAI as opt-in), with pre-LLM safety filters, an audit
 log, and a strict refusal taxonomy.
 
+**Who it's for:** researchers, analysts and non-technical stakeholders who
+want to ask questions of a tabular research dataset in plain English and get
+answers that are traceable to the data, without writing pandas or SQL.
+
+**Built with:** Python, Streamlit, native LLM function calling (Gemini /
+OpenAI / Ollama via a provider abstraction), pandas, pytest, Docker.
+
 ---
 
 ## Intended use and limitations
@@ -226,3 +233,11 @@ Out of scope for this POC, but the right shape for them is in place:
 - Evaluation harness with gold-standard Q&A pairs.
 - Persistence beyond the running process.
 - QMS alignment if any clinical use is ever contemplated.
+
+Planned work is tracked in **[ROADMAP.md](ROADMAP.md)**.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Unnikuttan Vijayan Velamkudy

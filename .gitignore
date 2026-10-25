@@ -7,3 +7,6 @@ logs/
 venv/
 .DS_Store
 *.egg-info/
+
+# Local tooling
+.claude/
